@@ -1,5 +1,6 @@
 # specificy the data paths here
 default:
+  # gwilliams2022: /home/lukas/data/gwilliams2023/
   gwilliams2022: ./data/gwilliams2022/
   schoffelen2019: ./data/schoffelen2019/
   brennan2019: ./data/brennan2019/

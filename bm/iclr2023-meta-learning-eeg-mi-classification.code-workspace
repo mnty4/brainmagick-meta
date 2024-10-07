@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../../iclr2023-meta-learning-eeg-mi-classification"
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../brain-meta-classifier"
+		},
+		{
+			"path": "../../../brainMagicCode"
+		}
+	],
+	"settings": {}
+}

@@ -25,7 +25,7 @@ from .utils import bold, copy_state, swap_state
 
 logger = logging.getLogger(__name__)
 
-
+# uses flashy as alternative for pytorch lightning for managing training, train is function called to begin training
 class Solver(flashy.BaseSolver):
     def __init__(self, args, datasets, model, feature_model=None, optimizer=None) -> None:
         super().__init__()
@@ -149,6 +149,7 @@ class Solver(flashy.BaseSolver):
             name: self.make_loader(getattr(datasets, name), shuffle=name in shuffled)
             for name in ["train", "valid", "test"]}
 
+    # Used for calculating CLIP loss
     def _make_negative_pool(self):
         # Check negative_pool_size
         if self.args.optim.negatives is not None:
@@ -178,6 +179,8 @@ class Solver(flashy.BaseSolver):
         assert features is not None
         if meg is None:
             meg = torch.zeros([273, features.shape[1]])
+        # Create a tensor of 1's with same dtype and device as features, and converts this to bool dtype
+        # .bool() is equivalent to .to(torch.bool)
         mask = torch.ones_like(features).to(features).bool()
         estimate = self._process_batch(
             SegmentBatch(
@@ -185,7 +188,8 @@ class Solver(flashy.BaseSolver):
                 recordings),
             training=False)[0]
         return estimate[0]
-
+    
+    # train the model
     def train(self) -> None:
         if len(self.history) > 0:
             logger.info("Replaying past metrics...")
@@ -211,12 +215,14 @@ class Solver(flashy.BaseSolver):
                                    f"{self.args.early_stop_patience} epochs. "
                                    "Stopping the training.")
                     will_stop = True
-
+            # run validation epoch if final iter (will_stop) or every so often (self.args.eval_every)
             if epoch % self.args.eval_every == 0 or will_stop:
                 if self.best_epoch > self.last_test_epoch:
                     assert self.best_state is not None
                     with swap_state(self.all_models, self.best_state):
+                        # don't update gradients
                         with torch.no_grad():
+                            # calculate eval loss
                             self.run_stage('test', self._test_one_epoch)
                     self.last_test_epoch = epoch
             if self.scale_reject is not None:
@@ -335,6 +341,7 @@ class Solver(flashy.BaseSolver):
 
         total = len(data_loader)
         if self.args.optim.max_batches:
+            # Max batches to perform in an epoch?
             total = min(total, self.args.optim.max_batches)
         logprog = self.log_progress(self.current_stage, data_loader,
                                     updates=self.args.num_prints, total=total)
