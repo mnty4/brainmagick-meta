@@ -543,3 +543,50 @@ def get_datasets(
     logger.info(msg)
 
     return Datasets(*splits)
+
+if __name__ == "__main__":
+  # get from running gwilliams study
+    selections = []
+    n_recordings = 4
+    skip_recordings = 0
+    shuffle_recordings_seed = 42
+    sample_rate = 16000
+    highpass = 0
+
+
+    all_recordings = _extract_recordings(
+        selections, n_recordings, skip_recordings=skip_recordings,
+    shuffle_recordings_seed=shuffle_recordings_seed)
+    all_recordings = LogProgress(logger, all_recordings,
+                                      name="Preparing cache", level=logging.DEBUG)
+    all_recordings = [  # for debugging
+        _preload(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings]
+    
+    print(all_recordings)
+
+    # get targets
+    dsets_per_split: tp.List[tp.List[SegmentDataset]] = [[], [], []]
+    for i, recording in enumerate(all_recordings):
+        events = recording.events()
+        blocks = events[events.kind == 'block']
+
+        if min_block_duration > 0 and not force_uid_assignement:
+            if recording.study_name() not in ['schoffelen2019']:
+                blocks = blocks.event.merge_blocks(min_block_duration_s=min_block_duration)
+
+        blocks = assign_blocks(
+            blocks, [test_ratio, valid_ratio], remove_ratio=remove_ratio, seed=split_assign_seed,
+            min_n_blocks_per_split=min_n_blocks_per_split)
+        for j, (fact, dsets) in enumerate(zip(factories, dsets_per_split)):
+            split_blocks = blocks[blocks.split == j]
+            if not split_blocks.empty:
+                start_stops = [(b.start, b.start + b.duration) for b in split_blocks.itertuples()]
+                dset = fact.apply(recording, blocks=start_stops)
+                if dset is not None:
+                    dsets.append(dset)
+                else:
+                    logger.warning(f'Empty blocks for split {j + 1}/{len(factories)} of '
+                                   f'recording {i + 1}/{n_recordings}.')
+            else:
+                logger.warning(f'No blocks found for split {j + 1}/{len(factories)} of '
+                               f'recording {i + 1}/{n_recordings}.')
