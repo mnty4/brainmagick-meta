@@ -9,6 +9,7 @@ from dora import hydra_main
 import logging
 import typing as tp
 import torch
+from hydra import initialize, compose
 import hydra
 import os
 from functools import lru_cache
@@ -260,10 +261,12 @@ class TrialDataset(Dataset):
         batches = []
         batch = []
         for i in range(n):
-            if i % self.samples_per_batch == 0:
+            if i > 0 and i % self.samples_per_batch == 0:
                 batches.append(batch)
                 batch = []
             batch.append({'x': x[i], 'y': y[i], 'word_label': word_labels[i]})
+        if batch:
+            batches.append(batch)
         return batches
 
     def __len__(self):
@@ -370,5 +373,7 @@ def main(args: tp.Any) -> float:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
 if __name__ == "__main__":
-    main()
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+    dset = main(cfg)
     
