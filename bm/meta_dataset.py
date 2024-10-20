@@ -1,3 +1,6 @@
+import pandas as pd
+from mne.io import Raw
+import json
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset
@@ -17,6 +20,7 @@ import torch.utils.data
 # from .cache import Cache
 from .dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
 from .train import override_args_
+from .speech_embeddings import GenerateEmbeddings
 from frozendict import frozendict
 
 
@@ -83,7 +87,7 @@ def deep_freeze_args(func):
 @list_to_tuple
 @deep_freeze_args
 @lru_cache(typed=True)
-def get_datasets(selections: tp.List[tp.Dict[str, tp.Any]],
+def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         n_recordings: int,
         test_ratio: float,
         valid_ratio: float,
@@ -129,6 +133,16 @@ def get_datasets(selections: tp.List[tp.Dict[str, tp.Any]],
 
     return raw, events
 
+def get_dataset(**kwargs):
+
+    raws, events = get_raw_events(**kwargs)
+
+    dset = MetaDataset(raws, events, offset=0.)
+
+    return dset
+
+
+
     # get targets
 
     # meg_dimension = max(recording.meg_dimension for recording in all_recordings)
@@ -172,59 +186,108 @@ def get_datasets(selections: tp.List[tp.Dict[str, tp.Any]],
     # print(dsets_per_split)
 
 class MetaDataset(Dataset):
-    def __init__(self, raw, events, n_shot, n_query) -> None:
+    def __init__(self, raws, events, offset = 0., **kwargs) -> None:
+
+        generate_embeddings = GenerateEmbeddings()
+        datasets = []
+        for raw, event in zip(raws, events):
+            raw: Raw
+            word_events: pd.DataFrame = event[event['kind'] == 'word']
+            descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
+            starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
+            x = []
+            y = []
+            w_lbs = []
+            
+            for (i, word_event), start in zip(word_events.iterrows(), starts):
+
+                if i >= 100: 
+                    break
+                # print(raw.annotations.description)
+                # print(raw.annotations.description[2])
+                # print(word_event)
+            
+                duration, word_label, wav_path = word_event['duration'], word_event['word'], word_event['sound'] 
+
+                wav_path = wav_path.lower()
+                
+                if duration < 0.05:
+                    continue
+
+                start = start + offset
+                end = start + duration + offset
+                print(start, end, wav_path, word_label)
+                t_idxs = raw.time_as_index([start, end])
+                data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+                audio_label = generate_embeddings.get_audio_embeddings(wav_path, start, duration)
+ 
+                x.append(data)
+                y.append(audio_label)
+                w_lbs.append(word_label)
+
+            datasets.append(TrialDataset(x, y, w_lbs, **kwargs))
         # load datasets into self.datasets
-        pass
+        self.datasets = datasets
+        self.len = len(self.datasets)
 
-    def __len__(self):
-        pass
-
-    def __getitem__(self, idx):
-        
-        return self.datasets[0]
-
-class TrialDataset(Dataset):
-    def __init__(self, x, y, word_labels, n_supp, n_query) -> None:
-        self.x = x
-        self.y = y
-        self.word_labels = word_labels
-        self.n_supp = n_supp
-        self.n_query = n_query
-        self.samples_per_batch = n_supp + n_query
-
-        self.batches = self.create_batches(x, y, word_labels)
-        self.len = len(self.batches)
-
-    def create_batches(self, x, y, word_labels):
-        total_batches = len(self.x) // self.n_supp + self.n_query
-        samples_per_batch = self.n_supp + self.n_query
-        x_np = np.array(x).reshape(total_batches, samples_per_batch, -1)
-
-        # n = len(x)
-        # for i in range(n):
-        #      = x[i], y[i], word_labels[i]
-
-
-        pass
     def __len__(self):
         return self.len
 
     def __getitem__(self, idx):
-        # self.samples_per_batch = 5
-        # idx = 3
-        # [15]
+        return self.datasets[idx]
 
-        start = self.samples_per_batch * idx 
-        end = self.samples_per_batch * idx + self.samples_per_batch
-        self.X[0]
-        self.Y[0]
-        self.word_label[0]
-        # get x[0] = brain wave clip, y[0] = audio clip
-        # where C is channels, F is features (NOT frequency), we don't perform fourier transform.
-        # x[0]: CxT
-        # y[0]: FxT
-        # y^[0]: FxT 
-        pass
+class TrialDataset(Dataset):
+    def __init__(self, x, y, word_labels, n_supp=32, n_query=32, **kwargs) -> None:
+        # self.x = x
+        # self.y = y
+        # self.word_labels = word_labels
+
+        # self.n_supp = n_supp
+        # self.n_query = n_query
+        self.samples_per_batch = n_supp + n_query
+
+        self.batches = self.create_batches(x, y, word_labels, n_supp, n_query)
+        self.len = len(self.batches)
+
+    def create_batches(self, x, y, word_labels, n_supp, n_query):
+        # n batches in a list
+        # within a batch is n_supp + n_query
+        total_batches = len(self.x) // self.samples_per_batch
+        
+        # x_np = np.array(x).reshape(total_batches, samples_per_batch, -1)
+
+        n = len(x)
+        batches = []
+        batch = []
+        for i in range(n):
+            if i % self.samples_per_batch == 0:
+                batches.append(batch)
+                batch = []
+            batch.append({'x': x[i], 'y': y[i], 'word_label': word_labels[i]})
+        return batches
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, idx):
+        return self.batches[idx]
+
+    # def __getitem__(self, idx):
+    #     # self.samples_per_batch = 5
+    #     # idx = 3
+    #     # [15]
+
+    #     start = self.samples_per_batch * idx 
+    #     end = self.samples_per_batch * idx + self.samples_per_batch
+    #     self.X[0]
+    #     self.Y[0]
+    #     self.word_label[0]
+    #     # get x[0] = brain wave clip, y[0] = audio clip
+    #     # where C is channels, F is features (NOT frequency), we don't perform fourier transform.
+    #     # x[0]: CxT
+    #     # y[0]: FxT
+    #     # y^[0]: FxT 
+    #     pass
 
 
 # dataset which takes n_shot, n_way
@@ -282,7 +345,7 @@ def run(args):
     if args.optim.loss == "clip":
         kwargs['extra_test_features'].append("WordHash")
 
-    return get_datasets(**kwargs, num_workers=args.num_workers)
+    return get_dataset(**kwargs, num_workers=args.num_workers)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:
