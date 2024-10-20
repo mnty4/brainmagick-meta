@@ -20,7 +20,7 @@ import torch.utils.data
 # from .cache import Cache
 from .dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
 from .train import override_args_
-from .speech_embeddings import GenerateEmbeddings
+from .speech_embeddings import SpeechEmbeddings
 from frozendict import frozendict
 
 
@@ -188,7 +188,7 @@ def get_dataset(**kwargs):
 class MetaDataset(Dataset):
     def __init__(self, raws, events, offset = 0., **kwargs) -> None:
 
-        generate_embeddings = GenerateEmbeddings()
+        generate_embeddings = SpeechEmbeddings()
         datasets = []
         for raw, event in zip(raws, events):
             raw: Raw
@@ -252,7 +252,7 @@ class TrialDataset(Dataset):
     def create_batches(self, x, y, word_labels, n_supp, n_query):
         # n batches in a list
         # within a batch is n_supp + n_query
-        total_batches = len(self.x) // self.samples_per_batch
+        total_batches = len(x) // self.samples_per_batch
         
         # x_np = np.array(x).reshape(total_batches, samples_per_batch, -1)
 

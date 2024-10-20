@@ -6,9 +6,9 @@ import os
 # processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-large-960h-lv60-self", torch_dtype=torch.float16, attn_implementation="flash_attention_2")
  # model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-large-960h-lv60-self", torch_dtype=torch.float16, attn_implementation="flash_attention_2", output_hidden_states=True).to(device)
 
-class GenerateEmbeddings:
-    def __init__(self, data_dir, **kwargs):
-        self.data_dir = data_dir or 'data/gwilliams2022/download'
+class SpeechEmbeddings:
+    def __init__(self, data_dir = 'data/gwilliams2022/download', **kwargs):
+        self.data_dir = data_dir
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
         self.model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h").to(self.device)
