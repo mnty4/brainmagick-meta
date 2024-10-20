@@ -249,11 +249,36 @@ class TrialDataset(Dataset):
 
         self.batches = self.create_batches(x, y, word_labels, n_supp, n_query)
         self.len = len(self.batches)
-
+    
     def create_batches(self, x, y, word_labels, n_supp, n_query):
+        n = len(x)
+        batches = []
+        total_batches = n // self.samples_per_batch
+        for i in range(total_batches + 1):
+
+            supp = []
+            for j in range(n_supp):
+                ii = i * self.samples_per_batch + j
+                if ii >= n:
+                    break
+                supp.append({'x': x[ii], 'y': y[ii], 'word_label': word_labels[ii]})
+
+            query = []
+            for j in range(n_query):
+                ii = i * self.samples_per_batch + n_supp + j
+                if ii >= n:
+                    break
+                query.append({'x': x[ii], 'y': y[ii], 'word_label': word_labels[ii]})
+
+            if query:
+                batches.append({'supp': supp, 'query': query})
+
+        return batches
+
+    def create_batches2(self, x, y, word_labels, n_supp, n_query):
         # n batches in a list
         # within a batch is n_supp + n_query
-        total_batches = len(x) // self.samples_per_batch
+        # total_batches = len(x) // self.samples_per_batch
         
         # x_np = np.array(x).reshape(total_batches, samples_per_batch, -1)
 
