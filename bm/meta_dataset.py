@@ -1,9 +1,10 @@
+from sklearn.model_selection import ShuffleSplit
 import pandas as pd
 from mne.io import Raw
 import json
 import numpy as np
 from pathlib import Path
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from omegaconf import OmegaConf
 from dora import hydra_main
 import logging
@@ -24,31 +25,9 @@ from .train import override_args_
 from .speech_embeddings import SpeechEmbeddings
 from frozendict import frozendict
 
-
-
 from dora.log import LogProgress
 
 logger = logging.getLogger(__name__)
-
-# def get_datasets(selections: tp.List[tp.Dict[str, tp.Any]],
-#         n_recordings: int,
-#         test_ratio: float,
-#         valid_ratio: float,
-#         sample_rate: int,  # FIXME
-#         remove_ratio: float = 0.,
-#         highpass: float = 0,
-#         shuffle_recordings_seed: int = -1,
-#         skip_recordings: int = 0,
-#         min_block_duration: float = 0.0,
-#         force_uid_assignement: bool = True,
-#         split_assign_seed: int = 12,
-#         min_n_blocks_per_split: int = 20,
-#         features: tp.Optional[tp.List[str]] = None,
-#         extra_test_features: tp.Optional[tp.List[str]] = None,
-#         apply_baseline: bool = True,
-#         test: dict = {},
-#         num_workers: int = 1,
-#         **factory_kwargs: tp.Any):
 
 def list_to_tuple(function: tp.Callable) -> tp.Any:
     """Custom decorator function, to convert list to a tuple."""
@@ -138,11 +117,41 @@ def get_dataset(**kwargs):
 
     raws, events = get_raw_events(**kwargs)
 
+    # train, val, test = split_subjects(raws, events)
+
     dset = MetaDataset(raws, events, offset=0.)
 
     return dset
 
+# def split(raws, events, train = 0.7, val = 0.2, test = 0.1):
+#     assert len(raws) == len(events)
 
+#     n = len(raws)
+
+#     tr = int(train * n)
+#     va = int(val * n)
+#     te = int(test * n)
+
+#     # if samples are missed, add them to test
+#     te += n - (tr + va + te)
+
+#     train_split, val_split, test_split = [], [], []
+
+#     train_split = {'raws': raws[:]}
+
+#     for i in range(tr):
+#         train_split.append(raws[i])
+
+    
+
+    
+        
+
+
+def get_dataloaders(train_dset, val_dset):
+    train_dataloader = DataLoader(train_dset, batch_size=64, shuffle=True)
+    val_dataloader = DataLoader(val_dset, batch_size=64, shuffle=True)
+    return train_dataloader, val_dataloader
 
     # get targets
 
@@ -187,8 +196,9 @@ def get_dataset(**kwargs):
     # print(dsets_per_split)
 
 class MetaDataset(Dataset):
-    def __init__(self, raws, events, offset = 0., **kwargs) -> None:
+    def __init__(self, raws, events, transform=None, offset = 0., **kwargs) -> None:
 
+        self.transform = transform
         generate_embeddings = SpeechEmbeddings()
         datasets = []
         for raw, event in zip(raws, events):
@@ -202,8 +212,8 @@ class MetaDataset(Dataset):
             
             for (i, word_event), start in zip(word_events.iterrows(), starts):
 
-                if i >= 100: 
-                    break
+                # if i >= 100: 
+                #     break
                 # print(raw.annotations.description)
                 # print(raw.annotations.description[2])
                 # print(word_event)
@@ -235,7 +245,10 @@ class MetaDataset(Dataset):
         return self.len
 
     def __getitem__(self, idx):
-        return self.datasets[idx]
+        dset = self.datasets[idx]
+        if self.transform:
+            dset = self.transform(dset)
+        return dset
 
 class TrialDataset(Dataset):
     def __init__(self, x, y, word_labels, n_supp=32, n_query=32, **kwargs) -> None:
