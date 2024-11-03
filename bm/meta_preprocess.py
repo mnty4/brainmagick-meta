@@ -1,3 +1,8 @@
+import pickle
+import json
+from sklearn.model_selection import train_test_split
+from collections import defaultdict
+from mne.time_frequency import Spectrum
 from sklearn.model_selection import ShuffleSplit
 import pandas as pd
 from mne.io import Raw
@@ -14,9 +19,10 @@ import hydra
 import os
 from functools import lru_cache
 import functools
-
+from tqdm import tqdm
 import torch.utils
 import torch.utils.data
+from bm.setup_logging import configure_logging
 # from . import env
 # from .cache import Cache
 from .dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
@@ -27,6 +33,8 @@ from frozendict import frozendict
 from dora.log import LogProgress
 
 logger = logging.getLogger(__name__)
+
+base = os.path.abspath(__package__)
 
 def list_to_tuple(function: tp.Callable) -> tp.Any:
     """Custom decorator function, to convert list to a tuple."""
@@ -78,7 +86,7 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         skip_recordings: int = 0,
         min_block_duration: float = 0.0,
         force_uid_assignement: bool = True,
-        shuffle_recordings_seed: int = -1,
+        shuffle_recordings_seed: int = 42,
         split_assign_seed: int = 12,
         min_n_blocks_per_split: int = 20,
         features: tp.Optional[tp.List[str]] = None,
@@ -91,7 +99,7 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         **factory_kwargs: tp.Any):
 
     # get from running gwilliams study
-
+    logger.info(f'Loading recordings...')
     all_recordings = _extract_recordings(
         selections, n_recordings, skip_recordings=skip_recordings,
     shuffle_recordings_seed=shuffle_recordings_seed)
@@ -102,12 +110,119 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
     
     print(all_recordings)
 
-    raw = [recording._load_raw() for recording in all_recordings]
-    events = [recording._load_events() for recording in all_recordings]
+    raws = [recording.preprocessed(120, 0) for recording in all_recordings]
+    events = [recording.events() for recording in all_recordings]
+    infos = [recording.mne_info for recording in all_recordings]
+    logger.info(f'Recordings loaded succesfully.')
+    return raws, events, infos
 
-    events[0].info()
 
-    return raw, events
+def preprocess_words(save_dir='preprocessed', **kwargs):
+    save_path = os.path.join(base, save_dir)
+    os.makedirs(save_path, exist_ok=True)
+
+    raws, events, infos = get_raw_events(**kwargs)
+
+    word_index = {}
+    word_index_path = os.path.join(save_path, f'word_index.pt')
+    if os.path.exists(word_index_path):
+        with open(word_index_path, "rb") as f:
+            word_index = torch.load(f, weights_only=True)
+
+    subs, word_index = preprocess_recordings(raws, events, infos, word_index, **kwargs)
+    logger.info(f'Saving tensors to "{save_path}"...')
+    for sub in subs:
+        torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
+
+    with open(word_index_path, "wb") as f:
+        torch.save(word_index, f)
+    logger.info(f'Save successful.')
+    return subs, word_index
+
+def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
+    subs_list = subs.values()
+    subs_ids = subs.keys()
+    task_t = np.array(subs_list)
+    # if by_trial:
+    #     task_t = task_t.flatten(0, 1)
+
+    tmp_subs, tmp_sub_ids, test_subs, test_sub_ids = train_test_split(task_t, subs_ids, test_size=0.2, random_state=seed, shuffle=True)
+    train_subs, train_sub_ids, valid_subs, valid_sub_ids = train_test_split(tmp_subs, tmp_sub_ids, test_size=0.125, random_state=seed, shuffle=True)
+    
+    # return train, valid, test
+    
+
+def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 60, **kwargs) -> dict:
+
+    generate_embeddings = SpeechEmbeddings()
+    subs = defaultdict(list)
+    word_index = word_index or {}
+    word_count = 0.
+    logger.info('Preprocessing recordings...')
+    for raw, event, info in tqdm(zip(raws, events, infos)):
+        raw: Raw
+        event: pd.DataFrame
+        
+        word_events: pd.DataFrame = event[event['kind'] == 'word']
+        # raw.annotations.to_data_frame().info()
+        # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
+        # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
+        sub_id = info['subject_info']['his_id']
+
+        x = []
+        y = []
+        w_lbs = []
+        
+        # for (i, word_event), start in zip(word_events.iterrows(), starts):
+        for i, word_event in word_events.iterrows():
+        
+            raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
+
+            wav_path = wav_path.lower()
+
+            raw_start = raw_start + offset
+            end = raw_start + duration + offset
+
+            t_idxs = raw.time_as_index([raw_start, end])
+            data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+            if data.shape[-1] < n_fft:
+                continue
+
+            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, n_fft=n_fft, verbose=False)
+            # spectrums.plot(picks="data", exclude="bads", amplitude=False)
+            data, freqs = spectrums.get_data(return_freqs=True)
+            # assert len(freqs) == 8
+
+            audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration)
+
+            if word_label in word_index:
+                word_id = word_index[word_label]
+            else:
+                word_id = word_count
+                word_index[word_label] = word_count
+                word_count += 1
+
+            # print(f'word: {word_label}, audio features: {torch.tensor(audio_label).shape}, PSD: {torch.tensor(data).shape}')
+            x.append(data)
+            y.append(audio_embedding)
+            w_lbs.append(word_id)
+
+        x = torch.tensor(np.array(x))
+        w_lbs = torch.tensor(w_lbs)
+
+        subs[sub_id].append((x, y, w_lbs))
+
+    logger.info('Recordings preprocessed successfully.')
+    return subs, word_index
+
+def preprocess_words_test(**kwargs):
+    subs, word_index = preprocess_words(save_dir='preprocessed', **kwargs)
+    save_path = os.path.join(base, 'preprocessed')
+    for sub in subs:
+        saved = torch.load(os.path.join(save_path, f'{sub}.pt'), weights_only=True)
+        assert len(subs[sub]) == len(saved)
+    saved = torch.load(os.path.join(save_path, f'word_index.pt'), weights_only=True)
+    assert len(word_index) == len(saved)
 
 
 def run(args):
@@ -118,7 +233,8 @@ def run(args):
     if args.optim.loss == "clip":
         kwargs['extra_test_features'].append("WordHash")
 
-    return get_raw_events(**kwargs, num_workers=args.num_workers)
+    # return get_raw_events(**kwargs, num_workers=args.num_workers)
+    return preprocess_words_test(**kwargs, num_workers=args.num_workers)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:
@@ -145,4 +261,5 @@ def main(args: tp.Any) -> float:
 if __name__ == "__main__":
     with initialize(version_base="1.1", config_path="conf"):
         cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
-    raws, events = main(cfg)
+    configure_logging()
+    main(cfg)
