@@ -16,6 +16,8 @@ from .meta_dataset import get_dataset, get_dataloaders
 from copy import deepcopy
 from tqdm import trange
 from torch.utils.tensorboard import SummaryWriter
+import logging
+from bm.setup_logging import configure_logging
 
 base = os.path.abspath(__package__)
 
@@ -28,7 +30,7 @@ torch.manual_seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def train_inner_loop(model: Module, batches, task_i, n_query=0, inner_lr=0.1):
+def train_inner_loop(model: Module, batches, task_i, inner_optim=None, n_query=0, inner_lr=0.1):
     """
         query: number of batches to process as query
 
@@ -45,7 +47,8 @@ def train_inner_loop(model: Module, batches, task_i, n_query=0, inner_lr=0.1):
 
     old_weights = deepcopy(model.state_dict())
 
-    inner_optim = optim.SGD(model.parameters(), inner_lr)
+    if not inner_optim:
+        inner_optim = optim.SGD(model.parameters(), inner_lr)
 
     supp_losses = []
 
@@ -66,15 +69,16 @@ def train_inner_loop(model: Module, batches, task_i, n_query=0, inner_lr=0.1):
 
     query_losses = []
 
-    for i in range(-n_query, 0):
-        batch = {
-            'eeg': batches['eeg'][task_i][i].to(DEVICE),
-            'audio': batches['audio'][task_i][i].to(DEVICE),
-            'word_index': batches['word_index'][task_i][i].to(DEVICE),
-        }
-        output = model.generate(batch)
-        clip_loss: torch.Tensor = output['clip_loss']
-        query_losses.append(clip_loss.item())
+    with torch.no_grad():
+        for i in range(-n_query, 0):
+            batch = {
+                'eeg': batches['eeg'][task_i][i].to(DEVICE),
+                'audio': batches['audio'][task_i][i].to(DEVICE),
+                'word_index': batches['word_index'][task_i][i].to(DEVICE),
+            }
+            output = model.generate(batch)
+            clip_loss: torch.Tensor = output['clip_loss']
+            query_losses.append(clip_loss.item())
 
     new_weights = deepcopy(model.state_dict())
 
@@ -82,7 +86,7 @@ def train_inner_loop(model: Module, batches, task_i, n_query=0, inner_lr=0.1):
 
     return new_weights, supp_losses, query_losses
 
-def meta_train(model: Module, train_dloader, val_loader, optimizer, word_index, save_dir=None, n_meta_epochs = 1, eval_interval=100, **kwargs):
+def meta_train(model: Module, train_dloader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, **kwargs):
     """
         Train the ClipMAE-Spatial-Emformer which takes:
 
@@ -101,15 +105,16 @@ def meta_train(model: Module, train_dloader, val_loader, optimizer, word_index, 
     writer, checkpoint_dir = setup_logging(save_dir)
     model = model.to(DEVICE)
     
-    for _ in range(n_meta_epochs):
+    for meta_epoch in range(n_meta_epochs):
         for i, meta_batch in enumerate(train_dloader):
-            train_loss = process_meta_batch(model, meta_batch)
+            train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim)
             writer.add_scalar('Train loss', train_loss, i)
 
             if i % eval_interval == 0 or i == len(train_dloader) - 1:
                 val_loss = evaluate(model, val_loader)
                 writer.add_scalar('Val loss', val_loss, i)
-                create_checkpoint(i, model, optimizer, val_loss, checkpoint_dir)     
+                logger.info(f'Meta epoch: {meta_epoch}, meta batch: {i}. Val loss = {val_loss}')
+                create_checkpoint(i, model, meta_optim, inner_optim, val_loss, checkpoint_dir)     
 
 def setup_logging(save_dir):
     runs_dir = os.path.join(base, save_dir or 'runs')
@@ -123,11 +128,12 @@ def setup_logging(save_dir):
     os.makedirs(checkpoint_dir)
     return SummaryWriter(checkpoint_dir), checkpoint_dir
 
-def create_checkpoint(i, model, optimizer, loss, checkpoint_dir):
+def create_checkpoint(i, model, meta_optim, inner_optim, loss, checkpoint_dir):
     torch.save({
             'epoch': i,
             'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
+            'meta_optim_state_dict': meta_optim.state_dict(),
+            'inner_optim_state_dict': inner_optim.state_dict(),
             'loss': loss,
             }, os.path.join(checkpoint_dir, f'checkpoint_{i}.pth'))
 
@@ -142,18 +148,33 @@ def evaluate(model, val_loader):
 
     return sum(query_losses_all) / len(query_losses_all)
 
-def process_meta_batch(model: Module, meta_batch, meta_lr=0.001):
+def process_meta_batch(model: Module, meta_batch: dict, meta_optim=None, inner_optim=None, meta_lr=0.001):
     weights_before = deepcopy(model.state_dict())
     new_state_dicts = []
     losses = []
     for i in range(meta_batch['eeg'].shape[0]):
-        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch, i)
+        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch, i, inner_optim)
         new_state_dicts.append(new_state_dict)
         losses.extend(supp_losses)
     
-    update_params(model, weights_before, new_state_dicts, meta_lr)
+    if meta_optim:
+        update_params_optim(model, weights_before, new_state_dicts, meta_optim)
+    else:
+        update_params(model, weights_before, new_state_dicts, meta_lr)
     
     return sum(losses) / len(losses)
+
+def update_params_optim(model: Module, weights_before: dict, new_state_dicts: list[dict], optimizer):
+    average_after: dict = average_state_dicts(new_state_dicts)
+
+    optimizer.zero_grad()
+    with torch.no_grad():  # Ensure we're not tracking gradients here
+        for param, key in zip(model.parameters(), weights_before.keys()):
+            # Apply the interpolation update directly
+            param.add_(average_after[key] - weights_before[key])
+
+    optimizer.step()
+
 
 def update_params(model: Module, weights_before, new_state_dicts, meta_lr):
     average_after = average_state_dicts(new_state_dicts)
@@ -165,7 +186,7 @@ def update_params(model: Module, weights_before, new_state_dicts, meta_lr):
 
 
 class TestModel(Module):
-    def __init__(self):
+    def __init__(self, num_channels, num_freq, num_classes):
         super(TestModel, self).__init__()
 
         self.conv1 = torch.nn.Conv2d(1, 16, kernel_size=3, padding=1)
@@ -173,7 +194,7 @@ class TestModel(Module):
         self.conv2 = torch.nn.Conv2d(16, 32, kernel_size=3, padding=1)
         self.bn2 = torch.nn.BatchNorm2d(32)
 
-        self.fc = torch.nn.Linear(32 * 8 * 208, 4)
+        self.fc = torch.nn.Linear(32 * num_freq * num_channels, num_classes)
 
     def forward(self, x):
         x = x.unsqueeze(1)
@@ -262,9 +283,12 @@ def test_meta_train():
         'audio': torch.rand((1, 5, 64, 840, 16)),
         'word_index': torch.randint(0, 3, (1, 5, 64)),
     }]
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
-    meta_train(model, train_dloader, val_dloader, optimizer, word_index)
+    meta_optim = optim.Adam(model.parameters(), lr=0.001)
+    inner_optim = optim.SGD(model.parameters(), lr=0.001)
+
+    meta_train(model, train_dloader, val_dloader, word_index, meta_optim, inner_optim)
 
 if __name__ == '__main__':
     # main()
+    configure_logging()
     test_meta_train()
