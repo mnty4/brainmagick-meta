@@ -1,3 +1,4 @@
+import torch.nn.functional as F
 import torch
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 import librosa
@@ -13,7 +14,7 @@ class SpeechEmbeddings:
         self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
         self.model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h").to(self.device)
 
-    def get_audio_embeddings(self, wav_path, start, duration, average_last_4_hidden_states=True):
+    def get_audio_embeddings(self, wav_path, start, duration, average_last_4_hidden_states=True, audio_embedding_length=30):
         
         audio, rate = librosa.load(os.path.join(self.data_dir, wav_path), sr = 16000, offset=start, duration=duration)
         
@@ -28,5 +29,13 @@ class SpeechEmbeddings:
         if average_last_4_hidden_states:
             hidden_states = outputs.hidden_states[-4:]
             audio_embeddings = torch.cat(hidden_states).mean(dim=0)
+
+        # pad
+        if audio_embeddings.shape[0] < audio_embedding_length:
+            to_pad = audio_embedding_length - audio_embeddings.shape[0]
+            audio_embeddings = F.pad(audio_embeddings, (0, 0, 0, to_pad), "constant", 0)
+        # trim
+        if audio_embeddings.shape[0] > audio_embedding_length:
+            audio_embeddings = audio_embeddings[:audio_embedding_length]
 
         return audio_embeddings

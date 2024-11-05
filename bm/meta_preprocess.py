@@ -1,3 +1,4 @@
+import torch.nn.functional as F
 import pickle
 import json
 from sklearn.model_selection import train_test_split
@@ -5,7 +6,7 @@ from collections import defaultdict
 from mne.time_frequency import Spectrum
 from sklearn.model_selection import ShuffleSplit
 import pandas as pd
-from mne.io import Raw
+from mne.io import Raw, RawArray
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
@@ -16,6 +17,7 @@ import typing as tp
 import torch
 from hydra import initialize, compose
 import hydra
+from typing import Tuple
 import os
 from functools import lru_cache
 import functools
@@ -34,7 +36,7 @@ from dora.log import LogProgress
 
 logger = logging.getLogger(__name__)
 
-base = os.path.abspath(__package__)
+base = os.path.dirname(os.path.abspath(__file__))
 
 def list_to_tuple(function: tp.Callable) -> tp.Any:
     """Custom decorator function, to convert list to a tuple."""
@@ -71,9 +73,9 @@ def deep_freeze_args(func):
         return func(*deep_freeze(args), **deep_freeze(kwargs))
     return wrapped
 
-@list_to_tuple
-@deep_freeze_args
-@lru_cache(typed=True)
+# @list_to_tuple
+# @deep_freeze_args
+# @lru_cache(typed=True)
 def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         n_recordings: int,
         test_ratio: float,
@@ -110,12 +112,49 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
     
     print(all_recordings)
 
-    raws = [recording.preprocessed(120, 0) for recording in all_recordings]
+    raws = [recording.preprocessed(128, 0).load_data() for recording in all_recordings]
     events = [recording.events() for recording in all_recordings]
     infos = [recording.mne_info for recording in all_recordings]
     logger.info(f'Recordings loaded succesfully.')
     return raws, events, infos
 
+def apply_baseline(raw, data):
+    baseline_start, baseline_end = 0, 0.5
+
+    baseline_idx = np.logical_and(raw.times >= baseline_start, raw.times <= baseline_end)
+
+    baseline_mean = data[:, baseline_idx].mean(axis=1, keepdims=True)
+
+    clamped_data = data - baseline_mean
+    return clamped_data
+
+def normalise(data):
+    std = np.std(data, axis=1, keepdims=True)
+    mean = np.mean(data, axis=1, keepdims=True)
+    normalised = (data - mean) / std
+    return normalised
+
+def apply_clamp(data):
+
+    mean = data.mean(axis=1, keepdims=True)
+    std_dev = data.std(axis=1, keepdims=True)
+    min_val = mean - 20 * std_dev
+    max_val = mean + 20 * std_dev
+    clamped_data = np.clip(data, min_val, max_val)
+
+    return clamped_data
+
+# inplace
+def preprocess_raws(raws):
+    for raw in raws:
+        data = raw.get_data()
+
+        data = apply_baseline(raw, data)
+        data = apply_clamp(data)
+        data = normalise(data)
+
+        raw._data = data
+        
 
 def preprocess_words(save_dir='preprocessed', **kwargs):
     save_path = os.path.join(base, save_dir)
@@ -123,13 +162,15 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
 
     raws, events, infos = get_raw_events(**kwargs)
 
+    preprocess_raws(raws)
+    
     word_index = {}
     word_index_path = os.path.join(save_path, f'word_index.pt')
     if os.path.exists(word_index_path):
         with open(word_index_path, "rb") as f:
             word_index = torch.load(f, weights_only=True)
 
-    subs, word_index = preprocess_recordings(raws, events, infos, word_index, **kwargs)
+    subs, word_index, additional_info = preprocess_recordings(raws, events, infos, word_index, **kwargs)
     logger.info(f'Saving tensors to "{save_path}"...')
     for sub in subs:
         torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
@@ -137,7 +178,7 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
     with open(word_index_path, "wb") as f:
         torch.save(word_index, f)
     logger.info(f'Save successful.')
-    return subs, word_index
+    return subs, word_index, additional_info
 
 def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     subs_list = subs.values()
@@ -152,13 +193,17 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     # return train, valid, test
     
 
-def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 60, **kwargs) -> dict:
+def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs) -> Tuple[dict, dict, dict]:
 
     generate_embeddings = SpeechEmbeddings()
     subs = defaultdict(list)
     word_index = word_index or {}
     word_count = 0.
     logger.info('Preprocessing recordings...')
+    segment_lengths = []
+    durations = []
+    min_audio_embedding = float('inf')
+    max_audio_embedding = 0
     for raw, event, info in tqdm(zip(raws, events, infos)):
         raw: Raw
         event: pd.DataFrame
@@ -168,12 +213,13 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
         # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
         sub_id = info['subject_info']['his_id']
+        
+        story_id = float(word_events.iloc[0]['story_uid'])
 
         x = []
         y = []
         w_lbs = []
-        
-        # for (i, word_event), start in zip(word_events.iterrows(), starts):
+        skipped = 0
         for i, word_event in word_events.iterrows():
         
             raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
@@ -185,15 +231,27 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
 
             t_idxs = raw.time_as_index([raw_start, end])
             data, times = raw[:, t_idxs[0]:t_idxs[1]] 
-            if data.shape[-1] < n_fft:
+
+            segment_lengths.append(data.shape[-1])
+            durations.append(duration)
+            if data.shape[-1] <= n_fft // 4:
+                skipped += 1
                 continue
-
-            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, n_fft=n_fft, verbose=False)
+            #     # pad with zeros if too short for window
+            #     to_pad = n_fft - data.shape[-1]
+            #     data = np.pad(data, ((0, 0), (0, to_pad)), "constant")
+            #     # continue
+            
+            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, 
+                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
             # spectrums.plot(picks="data", exclude="bads", amplitude=False)
+        #     spectrums.plot_topomap(bands = {'Delta (0-4 Hz)': (0, 4), 'Theta (4-8 Hz)': (4, 8),
+        #  'Alpha (8-12 Hz)': (8, 12), 'Beta (12-30 Hz)': (12, 30),
+        #  'Gamma (30-45 Hz)': (30, 45)}, normalize=True)
             data, freqs = spectrums.get_data(return_freqs=True)
-            # assert len(freqs) == 8
 
-            audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration)
+            audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
+                                                                       audio_embedding_length=audio_embedding_length)
 
             if word_label in word_index:
                 word_id = word_index[word_label]
@@ -207,22 +265,34 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             y.append(audio_embedding)
             w_lbs.append(word_id)
 
-        x = torch.tensor(np.array(x))
-        w_lbs = torch.tensor(w_lbs)
+        x = torch.tensor(np.array(x)).to(torch.float32)
+        y = torch.stack(y).to(torch.float32)
+        w_lbs = torch.tensor(w_lbs).to(torch.float32)
 
-        subs[sub_id].append((x, y, w_lbs))
-
+        trial = {
+            'story_uid': story_id,
+            'sub_id': sub_id,
+            'eeg': x,
+            'audio': y,
+            'w_lbs': w_lbs,
+        }
+        subs[sub_id].append(trial)
+        logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
+    word_index.update({i: w for w, i in word_index.items()})
     logger.info('Recordings preprocessed successfully.')
-    return subs, word_index
+    
+    return subs, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
 
 def preprocess_words_test(**kwargs):
-    subs, word_index = preprocess_words(save_dir='preprocessed', **kwargs)
+    subs, word_index, additional_info = preprocess_words(save_dir='preprocessed', **kwargs)
     save_path = os.path.join(base, 'preprocessed')
     for sub in subs:
         saved = torch.load(os.path.join(save_path, f'{sub}.pt'), weights_only=True)
-        assert len(subs[sub]) == len(saved)
+        for trial, trial_c in zip(subs[sub], saved):
+            assert len(trial['eeg']) == len(trial_c['eeg'])
     saved = torch.load(os.path.join(save_path, f'word_index.pt'), weights_only=True)
     assert len(word_index) == len(saved)
+    logger.info('Tests passed successfully.')
 
 
 def run(args):
@@ -234,7 +304,8 @@ def run(args):
         kwargs['extra_test_features'].append("WordHash")
 
     # return get_raw_events(**kwargs, num_workers=args.num_workers)
-    return preprocess_words_test(**kwargs, num_workers=args.num_workers)
+    # return preprocess_words_test(**kwargs, num_workers=args.num_workers)
+    return preprocess_words(**kwargs, num_workers=args.num_workers)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:

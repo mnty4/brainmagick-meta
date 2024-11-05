@@ -18,8 +18,10 @@ from tqdm import trange
 from torch.utils.tensorboard import SummaryWriter
 import logging
 from bm.setup_logging import configure_logging
+from bm.meta_dataset2 import get_datasets
+from typing import List
 
-base = os.path.abspath(__package__)
+base = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ torch.manual_seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def train_inner_loop(model: Module, batches, task_i, inner_optim=None, n_query=0, inner_lr=0.1):
+def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_lr=0.1):
     """
         query: number of batches to process as query
 
@@ -52,13 +54,13 @@ def train_inner_loop(model: Module, batches, task_i, inner_optim=None, n_query=0
 
     supp_losses = []
 
-    for i in range(batches['eeg'].shape[1] - n_query):
-        batch = {
-            'eeg': batches['eeg'][task_i][i].to(DEVICE),
-            'audio': batches['audio'][task_i][i].to(DEVICE),
-            'word_index': batches['word_index'][task_i][i].to(DEVICE),
-        }
-        output = model.generate(batch)
+    for i in range(len(batches) - n_query):
+        # batch = {
+        #     'eeg': batches[i]['eeg'].to(DEVICE),
+        #     'audio': batches[i]['audio'].to(DEVICE),
+        #     'word_index': batches[i]['word_index'].to(DEVICE),
+        # }
+        output = model.generate(batches[i])
 
         inner_optim.zero_grad()
         clip_loss: torch.Tensor = output['clip_loss']
@@ -71,12 +73,12 @@ def train_inner_loop(model: Module, batches, task_i, inner_optim=None, n_query=0
 
     with torch.no_grad():
         for i in range(-n_query, 0):
-            batch = {
-                'eeg': batches['eeg'][task_i][i].to(DEVICE),
-                'audio': batches['audio'][task_i][i].to(DEVICE),
-                'word_index': batches['word_index'][task_i][i].to(DEVICE),
-            }
-            output = model.generate(batch)
+            # batch = {
+            #     'eeg': batches[i]['eeg'].to(DEVICE),
+            #     'audio': batches[i]['audio'].to(DEVICE),
+            #     'word_index': batches[i]['word_index'].to(DEVICE),
+            # }
+            output = model.generate(batches[i])
             clip_loss: torch.Tensor = output['clip_loss']
             query_losses.append(clip_loss.item())
 
@@ -86,7 +88,7 @@ def train_inner_loop(model: Module, batches, task_i, inner_optim=None, n_query=0
 
     return new_weights, supp_losses, query_losses
 
-def meta_train(model: Module, train_dloader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, **kwargs):
+def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, **kwargs):
     """
         Train the ClipMAE-Spatial-Emformer which takes:
 
@@ -106,11 +108,11 @@ def meta_train(model: Module, train_dloader, val_loader, word_index, meta_optim=
     model = model.to(DEVICE)
     
     for meta_epoch in range(n_meta_epochs):
-        for i, meta_batch in enumerate(train_dloader):
+        for i, meta_batch in enumerate(train_loader):
             train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim)
             writer.add_scalar('Train loss', train_loss, i)
 
-            if i % eval_interval == 0 or i == len(train_dloader) - 1:
+            if i % eval_interval == 0 or i == len(train_loader) - 1:
                 val_loss = evaluate(model, val_loader)
                 writer.add_scalar('Val loss', val_loss, i)
                 logger.info(f'Meta epoch: {meta_epoch}, meta batch: {i}. Val loss = {val_loss}')
@@ -152,8 +154,8 @@ def process_meta_batch(model: Module, meta_batch: dict, meta_optim=None, inner_o
     weights_before = deepcopy(model.state_dict())
     new_state_dicts = []
     losses = []
-    for i in range(meta_batch['eeg'].shape[0]):
-        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch, i, inner_optim)
+    for i in range(len(meta_batch)):
+        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch[i], inner_optim)
         new_state_dicts.append(new_state_dict)
         losses.extend(supp_losses)
     
@@ -164,7 +166,7 @@ def process_meta_batch(model: Module, meta_batch: dict, meta_optim=None, inner_o
     
     return sum(losses) / len(losses)
 
-def update_params_optim(model: Module, weights_before: dict, new_state_dicts: list[dict], optimizer):
+def update_params_optim(model: Module, weights_before: dict, new_state_dicts: List[dict], optimizer):
     average_after: dict = average_state_dicts(new_state_dicts)
 
     optimizer.zero_grad()
@@ -195,22 +197,28 @@ class TestModel(Module):
         self.bn2 = torch.nn.BatchNorm2d(32)
 
         self.fc = torch.nn.Linear(32 * num_freq * num_channels, num_classes)
+        self.num_classes = num_classes
 
-    def forward(self, x):
+    def forward(self, x, w_lbs):
         x = x.unsqueeze(1)
         x = F.tanh(self.bn1(self.conv1(x)))
         x = F.tanh(self.bn2(self.conv2(x)))
         x = x.view(x.size(0), -1)
-        x = F.softmax(self.fc(x), dim=-1)
+        # x = F.softmax(self.fc(x), dim=-1)
+        logits = self.fc(x)
+        logits[:, w_lbs]
+
         return x
     
     def generate(self, x):
         x: dict
         x['eeg'] = x['eeg'].to(DEVICE)
-        x['word_index'] = x['word_index'].to(DEVICE)
-        pred = self.forward(x['eeg'])
+        x['audio'] = x['audio'].to(DEVICE)
+        x['w_lbs'] = x['w_lbs'].to(DEVICE).to(torch.int64)
+        pred = self.forward(x['eeg'], x['w_lbs'])
         cel = torch.nn.CrossEntropyLoss()
-        loss = cel(F.one_hot(x['word_index'], num_classes=4).to(torch.float32), pred)
+        # one_hot = F.one_hot(x['w_lbs'], num_classes=self.num_classes).to(torch.float32)
+        loss = cel(pred, x['w_lbs'])
         return {'clip_loss': loss}
 
 def run(args):
@@ -249,6 +257,21 @@ def main(args: tp.Any) -> float:
 
     if '_BM_TEST_PATH' in os.environ:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
+
+def test_meta_train_e2e():
+    train_dset, val_dset, word_index = get_datasets(is_train=True, mini_batches_per_trial=1, samples_per_mini_batch=64)
+    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+    train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+    val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+    model = TestModel(num_channels=208, num_freq=31, num_classes=len(word_index) // 2)
+    meta_optim = optim.Adam(model.parameters(), lr=0.001)
+    inner_optim = optim.SGD(model.parameters(), lr=0.001)
+    return meta_train(model, 
+                      train_loader=train_loader, 
+                      val_loader=val_loader, 
+                      word_index=word_index, 
+                      meta_optim=meta_optim, 
+                      inner_optim=inner_optim)
 
 def test_meta_train():
     """
@@ -291,4 +314,5 @@ def test_meta_train():
 if __name__ == '__main__':
     # main()
     configure_logging()
-    test_meta_train()
+    # test_meta_train()
+    test_meta_train_e2e()
