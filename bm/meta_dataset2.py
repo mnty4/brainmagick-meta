@@ -141,12 +141,12 @@ def get_dataset(subs: dict, mini_batches_per_trial=1, samples_per_mini_batch=64)
 
     return dset
 
-def get_datasets(is_train=True, **kwargs):
+def get_datasets(is_train=True, train_kwargs={}, val_kwargs={}, **kwargs):
     (train_subs, val_subs, test_subs), word_index = load_preprocessed(is_train=is_train, **kwargs)
 
     if is_train:
-        train_dset = get_dataset(train_subs, **kwargs)
-        val_dset = get_dataset(val_subs, **kwargs)
+        train_dset = get_dataset(train_subs, **kwargs, **train_kwargs)
+        val_dset = get_dataset(val_subs, **kwargs, **val_kwargs)
         return train_dset, val_dset, word_index
     else:
         test_dset = get_dataset(test_subs, **kwargs)

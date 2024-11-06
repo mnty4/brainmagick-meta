@@ -267,7 +267,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
 
         x = torch.tensor(np.array(x)).to(torch.float32)
         y = torch.stack(y).to(torch.float32)
-        w_lbs = torch.tensor(w_lbs).to(torch.float32)
+        w_lbs = torch.tensor(w_lbs).to(torch.int64)
 
         trial = {
             'story_uid': story_id,
