@@ -144,14 +144,19 @@ def apply_clamp(data):
 
     return clamped_data
 
+def apply_noise(data):
+    return np.random.normal(loc=0, scale=1, size=data.shape)
+
 # inplace
-def preprocess_raws(raws):
+def preprocess_raws(raws, random_noise=False, **kwargs):
     for raw in raws:
         data = raw.get_data()
-
-        data = apply_baseline(raw, data)
-        data = apply_clamp(data)
-        data = normalise(data)
+        if random_noise:
+            data = apply_noise(data)
+        else:
+            data = apply_baseline(raw, data)
+            data = apply_clamp(data)
+            data = normalise(data)
 
         raw._data = data
         
@@ -162,7 +167,7 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
 
     raws, events, infos = get_raw_events(**kwargs)
 
-    preprocess_raws(raws)
+    preprocess_raws(raws, **kwargs)
     
     word_index = {}
     word_index_path = os.path.join(save_path, f'word_index.pt')
@@ -227,9 +232,9 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             wav_path = wav_path.lower()
 
             raw_start = raw_start + offset
-            end = raw_start + duration + offset
+            raw_end = raw_start + duration
 
-            t_idxs = raw.time_as_index([raw_start, end])
+            t_idxs = raw.time_as_index([raw_start, raw_end])
             data, times = raw[:, t_idxs[0]:t_idxs[1]] 
 
             segment_lengths.append(data.shape[-1])
@@ -242,7 +247,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             #     data = np.pad(data, ((0, 0), (0, to_pad)), "constant")
             #     # continue
             
-            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, 
+            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
                                                   n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
             # spectrums.plot(picks="data", exclude="bads", amplitude=False)
         #     spectrums.plot_topomap(bands = {'Delta (0-4 Hz)': (0, 4), 'Theta (4-8 Hz)': (4, 8),
@@ -305,7 +310,10 @@ def run(args):
 
     # return get_raw_events(**kwargs, num_workers=args.num_workers)
     # return preprocess_words_test(**kwargs, num_workers=args.num_workers)
-    return preprocess_words(**kwargs, num_workers=args.num_workers)
+
+    kwargs['offset'] = 0.15
+
+    return preprocess_words(**kwargs, num_workers=args.num_workers, random_noise=True)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:

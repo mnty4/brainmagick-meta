@@ -122,6 +122,7 @@ class Gwilliams2022Recording(api.Recording):
         events = list()
         for annot in raw.annotations:
             event = eval(annot.pop("description"))
+            event['audio_start'] = event['start']
             event['start'] = annot['onset']
             event['duration'] = annot['duration']
             if event["kind"] == "sound":

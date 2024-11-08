@@ -23,7 +23,8 @@ import logging
 from bm.setup_logging import configure_logging
 from bm.meta_dataset2 import get_datasets
 from typing import List
-
+from bm.models.classification_head import EEG_Encoder_Classification_Head
+from bm.meta_evaluate import test
 base = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ seed = 0
 
 # rng = np.random.RandomState(seed)
 torch.manual_seed(seed)
+np.random.seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_lr=0.1, loss_type='clip_loss'):
@@ -91,7 +93,7 @@ def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_
 
     return new_weights, supp_losses, query_losses
 
-def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, do_meta_train=True, early_stop_patience=5, delta = 0.1, train_type='clip', **kwargs):
+def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, do_meta_train=True, early_stop_patience=5, delta = 0.05, train_type='clip', **kwargs):
     """
         Train the ClipMAE-Spatial-Emformer which takes:
 
@@ -108,7 +110,7 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
 
     """
 
-    writer, checkpoint_dir = setup_logging(save_dir, do_meta_train=do_meta_train, train_type=train_type)
+    writer, checkpoint_dir = setup_logging(save_dir, do_meta_train=do_meta_train, train_type=train_type, **kwargs)
 
     model = model.to(DEVICE)
     best_model = None
@@ -117,14 +119,14 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
     for meta_epoch in range(n_meta_epochs):
         for i, meta_batch in enumerate(train_loader):
             train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim, do_meta_train=do_meta_train, **kwargs)
-            writer.add_scalar('Train loss', train_loss, i)
+            writer.add_scalar('Train loss', train_loss, meta_epoch*len(train_loader) + i)
 
             if i % eval_interval == 0 or i == len(train_loader) - 1:
                 val_loss = evaluate(model, val_loader, inner_optim, **kwargs)
-                writer.add_scalar('Val loss', val_loss, i)
+                writer.add_scalar('Val loss', val_loss, meta_epoch*len(train_loader) + i)
                 logger.info(f'Meta epoch: {meta_epoch}, meta batch: {i}. Train loss = {train_loss}, Val loss = {val_loss}')
                 create_checkpoint(meta_epoch, i, model, meta_optim, inner_optim, val_loss, checkpoint_dir)  
-                if val_loss < best_val_loss - delta:
+                if i == len(train_loader) - 1 and val_loss < best_val_loss - delta:
                     best_val_loss = val_loss
                     best_train_loss = train_loss
                     best_model = deepcopy(model.state_dict())
@@ -138,24 +140,26 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
     logger.info(f'[Best model] Meta epoch: {best_epoch}, meta batch: {best_i}. Train loss = {best_train_loss}, Val loss = {best_val_loss}')
     writer.close()
 
-    best_path = os.path.join(checkpoint_dir, f'checkpoint_{best_epoch}_{best_i}.pth')
-    os.rename(best_path, os.path.join(checkpoint_dir, f'best_checkpoint_{best_epoch}_{best_i}.pth'))
+    old_path = os.path.join(checkpoint_dir, f'checkpoint_{best_epoch}_{best_i}.pth')
+    best_path = os.path.join(checkpoint_dir, f'best_checkpoint_{best_epoch}_{best_i}.pth')
+    os.rename(old_path, best_path)
 
     model.load_state_dict(best_model)
     return best_path
 
-def setup_logging(save_dir, do_meta_train=True, train_type='clip'):
+def setup_logging(save_dir, do_meta_train=True, train_type='clip', do_meta_train_for_head=False, **kwargs):
     runs_dir = os.path.join(base, save_dir or 'runs')
     version = 1
-    checkpoint_dir = os.path.join(runs_dir, f"{'non_meta_' if not do_meta_train else 'meta_'}v{version}")
+    file_name = f"{'non_meta_' if not do_meta_train else 'meta_'}"
+    if train_type == 'classifier':
+        file_name = 'm_head_' if do_meta_train_for_head else 'nm_head_' + 'classifier_' + file_name
+
+    checkpoint_dir = os.path.join(runs_dir, f"{file_name}v{version}")
 
     while os.path.exists(checkpoint_dir):
         version += 1
-        checkpoint_dir = os.path.join(runs_dir, f"{'non_meta_' if not do_meta_train else 'meta_'}v{version}")
+        checkpoint_dir = os.path.join(runs_dir, f"{file_name}v{version}")
     
-    if train_type == 'classifier':
-        checkpoint_dir = os.path.join(runs_dir, f"classifier_{'non_meta_' if not do_meta_train else 'meta_'}v{version - 1}")
-
     os.makedirs(checkpoint_dir)
     return SummaryWriter(checkpoint_dir), checkpoint_dir
 
@@ -221,56 +225,6 @@ def update_params(model: Module, weights_before, new_state_dicts, meta_lr):
 
 
 
-
-class EEG_Encoder_Classification_Head(Module):
-    def __init__(
-        self,
-        eeg_encoder,
-        num_classes,
-        eeg_projection
-    ):
-        super().__init__()
-        self.eeg_encoder = eeg_encoder
-        # freeze eeg encoder
-        for param in eeg_encoder.parameters():
-            param.requires_grad = False
-
-        self.num_classes = num_classes
-        self.fc = torch.nn.Linear(eeg_encoder.embed_dim, num_classes)
-        self.eeg_projection = eeg_projection
-        self.maxpool = torch.nn.AdaptiveMaxPool1d(1)
-        self.ce_loss = torch.nn.CrossEntropyLoss()
-    
-    def forward(self, batch):
-        eeg_input = batch["eeg"].float()
-        # use rand_like to replace eeg_input
-        mask_ratio = 0
-        # --------------------Encode---------------------
-        mae_loss, eeg_pred, eeg_mask, eeg_latent = self.eeg_encoder(eeg_input,mask_ratio)
-        # eeg_latent, eeg_mask, eeg_ids_restore= self.eeg_encoder.mask_encode(eeg_input,mask_ratio)
-        eeg_mae_encode = eeg_latent[:, 1:, :]
-        # apply max pooling to get eeg token
-        eeg_mae_encode = self.maxpool(eeg_mae_encode.transpose(1,2)).squeeze(-1)
-        
-        eeg_embeddings = self.eeg_projection(eeg_mae_encode)
-
-        batch_preds = self.fc(eeg_embeddings)
-
-        return batch_preds
-
-    def generate(self, batch):
-        x = self.forward(batch)
-        return {
-            'preds': x,
-            'ce_loss': self.ce_loss(x, batch['w_lbs'])
-        }
-
-    def predict(self, batch):
-        x = self.forward(batch)
-        x = F.softmax(x, dim=-1)
-        x = x.argmax(dim=-1)
-
-        return x
 
 
 
@@ -346,63 +300,124 @@ def main(args: tp.Any) -> float:
     if '_BM_TEST_PATH' in os.environ:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
-def test_normal_train_e2e():
-    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128}
-    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128}
+def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, loss_type='combined_loss', **kwargs):
+    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+    train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+    val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+
+    model_cls = registry.get_model_class("Clip-Audio-Emformer")    
+    model = model_cls.from_config(type='base', num_classes = len(word_index) // 2)
+    if do_meta_train:
+        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
+        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+    else:
+        meta_optim = None
+        inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+
+    inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+    best_model_path = meta_train(model, 
+                      train_loader=train_loader, 
+                      val_loader=val_loader, 
+                      word_index=word_index, 
+                      meta_optim=meta_optim, 
+                      inner_optim=inner_optim,
+                      n_meta_epochs=n_meta_epochs,
+                      do_meta_train=do_meta_train,
+                      loss_type=loss_type)
+    
+    ks = [1, 5, 15, 50, 500, 1500]
+    del model
+    del model_cls
+    del train_loader
+    del val_loader
+    del word_index
+    del inner_optim
+    
+    test(best_model_path, seed=42, ks=ks, type='classifier_combined', loss_type=loss_type, **test_kwargs)
+
+
+
+def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, do_meta_train_for_head=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, **kwargs):
+    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+
     train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
     print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
     train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+
     model_cls = registry.get_model_class("Clip-Audio-Emformer")    
-    model = model_cls.from_config(type='base')
-    # meta_optim = optim.Adam(model.parameters(), lr=0.001)
-    inner_optim = optim.Adam(model.parameters(), lr=0.001)
+    model = model_cls.from_config(type='base', use_classifier=False)
+    if do_meta_train:
+        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
+        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+    else:
+        meta_optim = None
+        inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+    
     best_model_path = meta_train(model, 
                       train_loader=train_loader, 
                       val_loader=val_loader, 
                       word_index=word_index, 
                     #   meta_optim=meta_optim, 
                       inner_optim=inner_optim,
-                      n_meta_epochs=20,
-                      do_meta_train=False)
+                      n_meta_epochs=n_meta_epochs,
+                      do_meta_train=do_meta_train,
+                      loss_type='clip_loss')
 
     classification_head = EEG_Encoder_Classification_Head(
         model.eeg_encoder, num_classes=len(word_index) // 2, eeg_projection=model.eeg_projection)
     
     inner_classifier_optim = optim.Adam(classification_head.parameters(), lr=0.001)
 
-    meta_train(classification_head,
+    best_classifier_model_path = meta_train(classification_head,
                     #  save_dir=best_model_path,
                        train_loader=train_loader, 
                       val_loader=val_loader, 
                       word_index=word_index, 
                     #   meta_optim=meta_optim, 
                       inner_optim=inner_classifier_optim,
-                      n_meta_epochs=20,
-                      do_meta_train=False,
+                      n_meta_epochs=n_meta_epochs,
+                      do_meta_train=do_meta_train_for_head,
                       train_type='classifier',
                       loss_type='ce_loss')
 
+    del model
+    del model_cls
+    del train_loader
+    del val_loader
+    del inner_optim
+    
+    ks = [1, 5, 15, 50, 500, 1500]
+    test(best_classifier_model_path, seed=42, ks=ks, type='classifier_head', loss_type='ce_loss', **test_kwargs)
 
-def test_meta_train_e2e():
-    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128}
-    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128}
-    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
-    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
-    train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
-    val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
-    # model = TestModel(num_channels=208, num_freq=31, num_classes=len(word_index) // 2)
-    model_cls = registry.get_model_class("Clip-Audio-Emformer")    
-    model = model_cls.from_config(type='base') #.cpu()
-    meta_optim = optim.Adam(model.parameters(), lr=0.001)
-    inner_optim = optim.SGD(model.parameters(), lr=0.001)
-    return meta_train(model, 
-                      train_loader=train_loader, 
-                      val_loader=val_loader, 
-                      word_index=word_index, 
-                      meta_optim=meta_optim, 
-                      inner_optim=inner_optim,
-                      n_meta_epochs=20)
+
+# def test_meta_train_combined_clf():
+#     train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128}
+#     val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128}
+#     train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+#     print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+#     train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+#     val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
+#     # model = TestModel(num_channels=208, num_freq=31, num_classes=len(word_index) // 2)
+#     model_cls = registry.get_model_class("Clip-Audio-Emformer")    
+#     model = model_cls.from_config(type='base') #.cpu()
+#     meta_optim = optim.Adam(model.parameters(), lr=0.001)
+#     inner_optim = optim.SGD(model.parameters(), lr=0.001)
+#     best_model_path = meta_train(model, 
+#                       train_loader=train_loader, 
+#                       val_loader=val_loader, 
+#                       word_index=word_index, 
+#                       meta_optim=meta_optim, 
+#                       inner_optim=inner_optim,
+#                       n_meta_epochs=20)
+    
+#     ks = [1, 5, 15, 50, 500, 1500]
+#     test(best_model_path, seed=42, ks=ks, type='clip')
 
 def test_meta_train():
     """
@@ -442,9 +457,78 @@ def test_meta_train():
 
     meta_train(model, train_dloader, val_dloader, word_index, meta_optim, inner_optim, n_meta_epochs=20)
 
+def run_tests():
+    # n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001,
+
+    # train_kwargs = {
+    #     'mini_batches_per_trial': 1, 
+    #     'samples_per_mini_batch': 128, 
+    #     'batch_size': 2,
+    # }
+    # val_kwargs = {
+    #     'mini_batches_per_trial': 1, 
+    #     'samples_per_mini_batch': 128, 
+    #     'batch_size': 2,
+    # }
+    # test_kwargs = {
+    #     'mini_batches_per_trial': 1, 
+    #     'samples_per_mini_batch': 128, 
+    #     'batch_size': 2,
+    # }
+    # test_kwargs['model_name'] = 'no_meta_combined_clf_2_1_128_shot_0_128'
+    # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False)
+    # test_kwargs['model_name'] = 'no_meta_clf_head_2_1_128_shot_0_128'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False)
+    # test_kwargs['model_name'] = 'meta_combined_clf_2_1_128_shot_0_128'
+    # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True)
+    # test_kwargs['model_name'] = 'meta_clf_nmhead_2_1_128_shot_0_128'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True)
+    # test_kwargs['model_name'] = 'meta_clf_mhead_2_1_128_shot_0_128'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
+
+    train_kwargs = {
+        'mini_batches_per_trial': 1, 
+        'samples_per_mini_batch': 64, 
+        'batch_size': 4,
+    }
+    val_kwargs = {
+        'mini_batches_per_trial': 5, 
+        'samples_per_mini_batch': 8, 
+        'batch_size': 4,
+    }
+    test_kwargs = {
+        'mini_batches_per_trial': 8, 
+        'samples_per_mini_batch': 8, 
+        'batch_size': 1,
+        'unfreeze_encoder_on_support': False,
+        'n_shot': 4,
+    }
+    kwargs = {
+        'n_meta_epochs': 5
+    }
+    test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
+    train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
+    test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
+    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
+    test_kwargs['model_name'] = 'meta_combined_clf_4_4_8_shot_4_8'
+    train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8'
+    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8'
+    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True, **kwargs)
+
+    # test_kwargs['unfreeze_encoder_on_support'] = True
+
+    # test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8_unfreeze'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True)
+    # test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8_unfreeze'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
+
 if __name__ == '__main__':
     # main()
     configure_logging()
+    run_tests()
     # test_meta_train()
     # test_meta_train_e2e()
-    test_normal_train_e2e()
+    # test_normal_train_e2e()
+    # test_normal_train_combined_clf()

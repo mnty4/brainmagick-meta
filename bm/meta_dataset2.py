@@ -7,8 +7,7 @@ from typing import Tuple, List
 import regex as re
 base = os.path.dirname(os.path.abspath(__file__))
 
-def load_preprocessed(is_train=True, preprocessed_dir='preprocessed', seed=42, **kwargs) -> Tuple[dict, dict]:
-    np.random.seed(seed)
+def load_preprocessed(is_train=True, preprocessed_dir='preprocessed', **kwargs) -> Tuple[dict, dict]:
     save_path = os.path.join(base, preprocessed_dir)
     tensor_paths = sorted(glob.glob(os.path.join(save_path, '*.pt')))
     sub_paths = []
@@ -62,7 +61,7 @@ def load_preprocessed(is_train=True, preprocessed_dir='preprocessed', seed=42, *
         for idx in test_ids:
             path = sub_paths[idx]
             name = os.path.basename(path)
-            test_subs[name] = torch.load(path, weights_only=True)
+            test_subs[name] = torch.load(path, weights_only=False)
 
     return (train_subs, val_subs, test_subs), word_index
 
@@ -133,15 +132,25 @@ def flatten_subs(subs):
         trials.extend(trial for trial in subs[sub])
     return trials
 
-def get_dataset(subs: dict, mini_batches_per_trial=1, samples_per_mini_batch=64):
+def shuffle_samples(trials):
+    for i, trial in enumerate(trials):
+        ids = torch.randperm(trial['eeg'].shape[0])
+        trials[i]['eeg'] = trials[i]['eeg'][ids]
+        trials[i]['audio'] = trials[i]['audio'][ids]
+        trials[i]['w_lbs'] = trials[i]['w_lbs'][ids]
+
+def get_dataset(subs: dict, mini_batches_per_trial=1, samples_per_mini_batch=64, **kwargs):
 
     trials = flatten_subs(subs)
+
+    shuffle_samples(trials)
 
     dset = Trials_Dataset(trials, mini_batches_per_trial=mini_batches_per_trial, samples_per_mini_batch=samples_per_mini_batch)
 
     return dset
 
 def get_datasets(is_train=True, train_kwargs={}, val_kwargs={}, **kwargs):
+    torch.cuda.empty_cache()
     (train_subs, val_subs, test_subs), word_index = load_preprocessed(is_train=is_train, **kwargs)
 
     if is_train:
