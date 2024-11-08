@@ -487,7 +487,7 @@ def run_tests():
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
 
     train_kwargs = {
-        'mini_batches_per_trial': 1, 
+        'mini_batches_per_trial': 4, 
         'samples_per_mini_batch': 64, 
         'batch_size': 4,
     }
