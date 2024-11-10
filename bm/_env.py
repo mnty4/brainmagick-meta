@@ -12,7 +12,7 @@ import typing as tp
 from pathlib import Path
 import yaml
 
-from .utils import identify_host
+from utils import identify_host
 
 
 logger = logging.getLogger(__name__)

@@ -9,7 +9,7 @@ import torch
 from bm.models.classification_head import EEG_Encoder_Classification_Head
 import os
 import logging
-from bm.meta_dataset2 import get_datasets
+from bm.meta_dataset3 import get_datasets
 from torch.utils.data import DataLoader
 from bm.setup_logging import configure_logging
 base = os.path.dirname(os.path.abspath(__file__))
@@ -102,11 +102,17 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
                     batch['w_lbs'] = batch['w_lbs'].to(DEVICE)
                     output = model.generate(batch)
                     logits = output['clf_logits'].to(DEVICE)
+                print('len(ks)',len(ks))
+                print('ks',ks, 'logits', logits.shape)
+                # ks [1, 5, 15, 50, 500, 1500] logits torch.Size([8, 1391])
+
                 for j in range(len(ks)):
+                    print('j',j)
                     _, top_k_indices = torch.topk(logits, k=ks[j], dim=-1)
                     correct = top_k_indices.eq(batch['w_lbs'].view(-1, 1).expand_as(top_k_indices))
                     correct_ks[j] += sum(correct.sum(dim=-1)).item()
                 total += logits.shape[0]
+                
             
             model.load_state_dict(old)
 
@@ -125,7 +131,7 @@ def load_model(model_dir, word_index, type='classifier_head', inner_lr=0.001, **
 """
     loaded = torch.load(model_dir)
     model_state_dict = loaded['model_state_dict']
-    model_cls = registry.get_model_class("Clip-Audio-Emformer")
+    model_cls = registry.get_model_class("Clip-Audio-Emformer-Lukas")
 
     if type == 'classifier_head':
         clip_model = model_cls.from_config(type='base', use_classifier=False)

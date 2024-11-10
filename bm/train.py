@@ -18,9 +18,9 @@ import mne
 from omegaconf import OmegaConf
 import torch
 
-from . import dataset as dset
-from .models import ConvRNN, SimpleConv, DeepMel
-from .solver import Solver
+from bm import dataset as dset
+from bm.models import ConvRNN, SimpleConv, DeepMel
+from bm.solver import Solver
 
 logger = logging.getLogger(__name__)
 
@@ -168,22 +168,22 @@ def override_args_(args: tp.Any):
         args.cache = to_absolute_path(args.cache)
 
 
-@hydra_main(config_name="config", config_path="conf", version_base="1.1")
-def main(args: tp.Any) -> float:
-    override_args_(args)
+# @hydra_main(config_name="config", config_path="conf", version_base="1.1")
+# def main(args: tp.Any) -> float:
+#     override_args_(args)
+#     global __file__  # pylint: disable=global-statement,redefined-builtin
+#     # Fix bug when using multiprocessing with Hydra
+#     __file__ = hydra.utils.to_absolute_path(__file__)
 
-    global __file__  # pylint: disable=global-statement,redefined-builtin
-    # Fix bug when using multiprocessing with Hydra
-    __file__ = hydra.utils.to_absolute_path(__file__)
-
-    from . import env  # we need this here otherwise submitit pickle does crazy stuff.
-    # Updating paths in config that should stay relative to the original working dir
-    with env.temporary_from_args(args):
-        torch.set_num_threads(1)
-        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
-        logger.info(f"Caching intermediate data under {args.cache}.")
-        logger.debug(args)
-        return run(args)
+#     from bm import env  # we need this here otherwise submitit pickle does crazy stuff.
+#     # Updating paths in config that should stay relative to the original working dir
+#     # with env.temporary_from_args(args):
+#     #     torch.set_num_threads(1)
+#     #     logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+#     #     logger.info(f"Caching intermediate data under {args.cache}.")
+#     #     logger.debug(args)
+        
+#     return run(args)
 
 
 if '_BM_TEST_PATH' in os.environ:

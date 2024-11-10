@@ -378,7 +378,11 @@ Datasets = namedtuple("Datasets", "train valid test")
 def _preload(recording: studies.Recording, **kwargs: tp.Any) -> studies.Recording:
     """Calls cached data to create it if need be
     """
+
     recording.events()
+    # print('recording.events')
+    # print(recording._events)# this is a pandas dataframe
+
     recording.preprocessed(**kwargs)
     return recording
 
@@ -388,7 +392,11 @@ def _extract_recordings(selections: tp.List[tp.Dict[str, tp.Any]], n_recordings:
                         ) -> tp.Sequence[studies.Recording]:
     """Extract the number of recordings required, and mix audio and visual if need be
     """  # this is a function to help testing, especially the "any" case
+    print('[_extract_recordings]: selections',selections)
+    # selections [{'study': 'broderick2019'}]
+    
     recording_lists = [list(studies.from_selection(select)) for select in selections]
+    # print('recording_lists',recording_lists)
     if shuffle_recordings_seed > 0:  # deactivated if -1
         rng = np.random.RandomState(seed=shuffle_recordings_seed)
         for subjs in recording_lists:
@@ -396,8 +404,7 @@ def _extract_recordings(selections: tp.List[tp.Dict[str, tp.Any]], n_recordings:
     all_recordings = list(roundrobin(*recording_lists))
     all_recordings = all_recordings[skip_recordings: skip_recordings + n_recordings]
     if len(all_recordings) < n_recordings:
-        logger.warning("Requested %d recordings but only found %d",
-                       n_recordings, len(all_recordings))
+        logger.warning("Requested %d recordings but only found %d", n_recordings, len(all_recordings))
     # assign subject index
     uids = sorted(set((r.__class__.__name__, r.subject_uid) for r in all_recordings))
     uids_index = {uid: k for k, uid in enumerate(uids)}
@@ -441,16 +448,20 @@ def get_datasets(
         extra_test_features = []
     assert env.cache is not None
     num_workers = max(1, min(n_recordings, num_workers))
-
     # Use barrier to prevent multiple workers from computing the cache
     # in parallel.
-    if not flashy.distrib.is_rank_zero():
+    if not flashy.distrib.is_rank_zero(): # only one worker will do the following
         flashy.distrib.barrier()  # type: ignore
     # get recordings
     all_recordings = _extract_recordings(
         selections, n_recordings, skip_recordings=skip_recordings,
         shuffle_recordings_seed=shuffle_recordings_seed)
-    if num_workers <= 1:
+    # print('#### dataset finshed getting all recordings','number of recordings',len(all_recordings))
+    # print()
+    # print('#### dataset start preloading...','num_workers',num_workers)
+    
+    # here is two ways of runing the _preload function
+    if num_workers <= 1: 
         if progress:
             all_recordings = LogProgress(logger, all_recordings,   # type: ignore
                                          name="Preparing cache", level=logging.DEBUG)
@@ -465,6 +476,9 @@ def get_datasets(
                 jobs = LogProgress(logger, jobs, name="Preparing cache",  # type: ignore
                                    level=logging.DEBUG)
             all_recordings = [j.result() for j in jobs]  # check for exceptions
+    # after runing the preload function
+
+
     if flashy.distrib.is_rank_zero():
         flashy.distrib.barrier()  # type: ignore
     # create datasets through factory, split them and concatenate
@@ -481,13 +495,21 @@ def get_datasets(
 
     n_recordings = len(all_recordings)
     if progress:
-        all_recordings = LogProgress(
-            logger, all_recordings, name="Loading Subjects")  # type: ignore[assignment]
+        all_recordings = LogProgress(logger, all_recordings, name="Loading Subjects")  # type: ignore[assignment]
 
     dsets_per_split: tp.List[tp.List[SegmentDataset]] = [[], [], []]
     for i, recording in enumerate(all_recordings):
         events = recording.events()
-        blocks = events[events.kind == 'block']
+        blocks = events[events.kind == 'block'] # this is a pandas dataframe
+        # print('blocks',blocks.head())
+
+        '''
+        for brodrick 
+        there are blocks 
+        
+        '''
+        # print('min_block_duration',min_block_duration,'force_uid_assignement',force_uid_assignement)
+        # min_block_duration 6 force_uid_assignement False
 
         if min_block_duration > 0 and not force_uid_assignement:
             if recording.study_name() not in ['schoffelen2019']:
@@ -496,8 +518,20 @@ def get_datasets(
         blocks = assign_blocks(
             blocks, [test_ratio, valid_ratio], remove_ratio=remove_ratio, seed=split_assign_seed,
             min_n_blocks_per_split=min_n_blocks_per_split)
+        # print('blocks',type(blocks))# still dataframe
+        # print('blocks',blocks.head())
+        # save blocks file to 
+        # blocks.to_csv('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/for_test/blocks.csv',index=False)
+        # print('dsets_per_split',dsets_per_split)
+        # so dsets_per_split = [[], [], []] this is the container for each data in a split
+
         for j, (fact, dsets) in enumerate(zip(factories, dsets_per_split)):
             split_blocks = blocks[blocks.split == j]
+            # print((blocks.split == j), j)
+            # print(' loop j',j,dsets,fact)
+            # print('split_blocks',split_blocks.head())
+            # split_blocks.to_csv('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/for_test/split_blocks.csv',index=False)
+            print('split_blocks.empty',split_blocks.empty)
             if not split_blocks.empty:
                 start_stops = [(b.start, b.start + b.duration) for b in split_blocks.itertuples()]
                 dset = fact.apply(recording, blocks=start_stops)
@@ -507,9 +541,10 @@ def get_datasets(
                     logger.warning(f'Empty blocks for split {j + 1}/{len(factories)} of '
                                    f'recording {i + 1}/{n_recordings}.')
             else:
+                print('\n\n\n ?????????????????????? \n\n\n')
                 logger.warning(f'No blocks found for split {j + 1}/{len(factories)} of '
                                f'recording {i + 1}/{n_recordings}.')
-
+        # exit(0)
     if not allow_empty_split:
         empty_names = [name for name, dset in zip(
             ['train', 'valid', 'test'], dsets_per_split[::-1]) if len(dset) == 0]
@@ -541,52 +576,10 @@ def get_datasets(
     splits = [ConcatDataset(dset) for dset in dsets_per_split[::-1]]
     msg = '# Examples (train | valid | test): ' + ' | '.join([str(len(dset)) for dset in splits])
     logger.info(msg)
-
+    print('#### dataset finished building datasets')
+    
     return Datasets(*splits)
 
-if __name__ == "__main__":
-  # get from running gwilliams study
-    selections = []
-    n_recordings = 4
-    skip_recordings = 0
-    shuffle_recordings_seed = 42
-    sample_rate = 16000
-    highpass = 0
+# if main
 
-
-    all_recordings = _extract_recordings(
-        selections, n_recordings, skip_recordings=skip_recordings,
-    shuffle_recordings_seed=shuffle_recordings_seed)
-    all_recordings = LogProgress(logger, all_recordings,
-                                      name="Preparing cache", level=logging.DEBUG)
-    all_recordings = [  # for debugging
-        _preload(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings]
-    
-    print(all_recordings)
-
-    # get targets
-    dsets_per_split: tp.List[tp.List[SegmentDataset]] = [[], [], []]
-    for i, recording in enumerate(all_recordings):
-        events = recording.events()
-        blocks = events[events.kind == 'block']
-
-        if min_block_duration > 0 and not force_uid_assignement:
-            if recording.study_name() not in ['schoffelen2019']:
-                blocks = blocks.event.merge_blocks(min_block_duration_s=min_block_duration)
-
-        blocks = assign_blocks(
-            blocks, [test_ratio, valid_ratio], remove_ratio=remove_ratio, seed=split_assign_seed,
-            min_n_blocks_per_split=min_n_blocks_per_split)
-        for j, (fact, dsets) in enumerate(zip(factories, dsets_per_split)):
-            split_blocks = blocks[blocks.split == j]
-            if not split_blocks.empty:
-                start_stops = [(b.start, b.start + b.duration) for b in split_blocks.itertuples()]
-                dset = fact.apply(recording, blocks=start_stops)
-                if dset is not None:
-                    dsets.append(dset)
-                else:
-                    logger.warning(f'Empty blocks for split {j + 1}/{len(factories)} of '
-                                   f'recording {i + 1}/{n_recordings}.')
-            else:
-                logger.warning(f'No blocks found for split {j + 1}/{len(factories)} of '
-                               f'recording {i + 1}/{n_recordings}.')
+# all_recordings = [_preload(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings]

@@ -305,4 +305,5 @@ class Brennan2019Recording(api.Recording):
     def _load_events(self) -> pd.DataFrame:
         file = get_paths().download / "proc" / f"{self.subject_uid}.mat"
         events = _read_meta(file)
+        print('[brennan2019] get events', events)   
         return events

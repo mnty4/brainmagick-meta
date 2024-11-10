@@ -1,7 +1,7 @@
 from lavis import registry
 # import lavis.models.belt3_models.belt_clip_mae import Clip_TemporalConformer2D
-import lavis.models.belt3_models.belt_clip_mae
-from .state_dict_helpers import average_state_dicts, interpolate_state_dicts
+import lavis.models.belt3_models.belt_clip_mae_lukas
+from state_dict_helpers import average_state_dicts, interpolate_state_dicts
 from omegaconf import OmegaConf
 import os
 import torch
@@ -14,18 +14,23 @@ import numpy as np
 import logging
 import typing as tp
 import hydra
-from .train import override_args_
-from .meta_dataset import get_dataset, get_dataloaders
+from train import override_args_
+from meta_dataset import get_dataset, get_dataloaders
 from copy import deepcopy
 from tqdm import trange
 from torch.utils.tensorboard import SummaryWriter
 import logging
 from bm.setup_logging import configure_logging
-from bm.meta_dataset2 import get_datasets
+from bm.meta_dataset3 import get_datasets
 from typing import List
 from bm.models.classification_head import EEG_Encoder_Classification_Head
 from bm.meta_evaluate import test
-base = os.path.dirname(os.path.abspath(__file__))
+
+# python meta_learner.py
+print('import sucessful')
+
+# exit(0)
+base  = "/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm/" 
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +120,7 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
     model = model.to(DEVICE)
     best_model = None
     best_val_loss, best_train_loss = float('inf'), float('inf')
-    best_epoch, best_i = None, None
+    best_epoch, best_i = 0, 0
     for meta_epoch in range(n_meta_epochs):
         for i, meta_batch in enumerate(train_loader):
             train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim, do_meta_train=do_meta_train, **kwargs)
@@ -132,6 +137,8 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
                     best_model = deepcopy(model.state_dict())
                     best_epoch = meta_epoch
                     best_i = i
+            # print('Meta epoch: ', meta_epoch, 'Meta batch: ', i,'stop for debugging')
+            # break
 
         if meta_epoch - best_epoch >= early_stop_patience:
             logger.info('Early stopping triggered...')
@@ -309,7 +316,7 @@ def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=Fals
     train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
 
-    model_cls = registry.get_model_class("Clip-Audio-Emformer")    
+    model_cls = registry.get_model_class("Clip-Audio-Emformer-Lukas")    
     model = model_cls.from_config(type='base', num_classes = len(word_index) // 2)
     if do_meta_train:
         meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
@@ -329,7 +336,7 @@ def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=Fals
                       do_meta_train=do_meta_train,
                       loss_type=loss_type)
     
-    ks = [1, 5, 15, 50, 500, 1500]
+    ks = [1, 5, 15, 50, 500 ] # , 1500
     del model
     del model_cls
     del train_loader
@@ -350,7 +357,7 @@ def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, d
     train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
 
-    model_cls = registry.get_model_class("Clip-Audio-Emformer")    
+    model_cls = registry.get_model_class("Clip-Audio-Emformer-Lukas")    
     model = model_cls.from_config(type='base', use_classifier=False)
     if do_meta_train:
         meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
@@ -392,7 +399,7 @@ def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, d
     del val_loader
     del inner_optim
     
-    ks = [1, 5, 15, 50, 500, 1500]
+    ks = [1, 5, 15, 50, 500] # , 1500
     test(best_classifier_model_path, seed=42, ks=ks, type='classifier_head', loss_type='ce_loss', **test_kwargs)
 
 
@@ -487,7 +494,7 @@ def run_tests():
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
 
     train_kwargs = {
-        'mini_batches_per_trial': 4, 
+        'mini_batches_per_trial': 1, 
         'samples_per_mini_batch': 64, 
         'batch_size': 4,
     }
@@ -508,14 +515,14 @@ def run_tests():
     }
     test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
     train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
-    test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
-    test_kwargs['model_name'] = 'meta_combined_clf_4_4_8_shot_4_8'
-    train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
-    test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
-    test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True, **kwargs)
+    # test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
+    # test_kwargs['model_name'] = 'meta_combined_clf_4_4_8_shot_4_8'
+    # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    # test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    # test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True, **kwargs)
 
     # test_kwargs['unfreeze_encoder_on_support'] = True
 
@@ -523,7 +530,7 @@ def run_tests():
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True)
     # test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8_unfreeze'
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
-
+# CUDA_VISIBLE_DEVICES=0 python meta_learner.py
 if __name__ == '__main__':
     # main()
     configure_logging()

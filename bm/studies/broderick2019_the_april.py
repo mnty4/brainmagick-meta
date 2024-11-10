@@ -23,71 +23,47 @@ import spacy
 
 from . import api, utils
 from ..events import extract_sequence_info
-# import matplotlib.pyplot as plt
+
 
 SPACY_MODEL = "en_core_web_md"
 
 
 def get_paths() -> utils.StudyPaths:
-    return utils.StudyPaths(Broderick2019Recording.study_name())
+    return utils.StudyPaths(Broderick2019_the_aprilRecording.study_name())
 
 
 def _prepare():
-    print("Preparing Broderick_2019 dataset...")
-    
     paths = get_paths()
-
-    print("Downloading Broderick_2019 dataset to",paths.download)
     paths.download.mkdir(exist_ok=True, parents=True)
     #url = "http://datadryad.org/api/v2/datasets/"
     #url += "doi%253A10.5061%252Fdryad.070jc/download"
-    
-    '''
-    since these dataset urls are currently not available, we will copy these files to the download folder   
-    so rewrite the logic
-    '''
-    dsets = {
+    zip_dset = paths.download / "doi_10.5061_dryad.070jc__v3.zip"
+
+    # download public files
+    if not zip_dset.exists():
+        print("Downloading Broderick_2019_the_april dataset...")
+
+        dsets = {
             "Cocktail Party.zip": "https://datadryad.org/stash/downloads/file_stream/222584",
             "N400.zip": "https://datadryad.org/stash/downloads/file_stream/222585",
             "Natural Speech - Reverse.zip": "https://datadryad.org/stash/downloads/file_stream/222586",
             "Natural Speech.zip": "https://datadryad.org/stash/downloads/file_stream/222587",
             "Speech in Noise.zip": "https://datadryad.org/stash/downloads/file_stream/222588"
         }
-    # check if the files are already downloaded
-    for dset, url in dsets.items():
-        if not (paths.download / dset).exists():
-            print(f"{dset} does not exist in {paths.download}, please copy the files to the download folder")
-        else:
-            print(f"{dset} exists in {paths.download}")
-            continue
-            
-    
 
-    # zip_dset = paths.download / "doi_10.5061_dryad.070jc__v3.zip"
-    # # download public files
-    # if not zip_dset.exists():
-    #     print("Downloading Broderick_2019 dataset...")
-    #     dsets = {
-    #         "Cocktail Party.zip": "https://datadryad.org/stash/downloads/file_stream/222584",
-    #         "N400.zip": "https://datadryad.org/stash/downloads/file_stream/222585",
-    #         "Natural Speech - Reverse.zip": "https://datadryad.org/stash/downloads/file_stream/222586",
-    #         "Natural Speech.zip": "https://datadryad.org/stash/downloads/file_stream/222587",
-    #         "Speech in Noise.zip": "https://datadryad.org/stash/downloads/file_stream/222588"
-    #     }
-
-    #     for dset, url in dsets.items():
-    #         zipfile = paths.download / dset
-    #         if zipfile.exists():
-    #             continue
-    #         urlretrieve(url, zipfile)
-    #         print(f"Extracting {zipfile}...")
-    #         with ZipFile(str(zipfile), "r") as zip:
-    #             zip.extractall(str(paths.download))
+        for dset, url in dsets.items():
+            zipfile = paths.download / dset
+            if zipfile.exists():
+                continue
+            urlretrieve(url, zipfile)
+            print(f"Extracting {zipfile}...")
+            with ZipFile(str(zipfile), "r") as zip:
+                zip.extractall(str(paths.download))
 
     '''
     # extract
     if not any([f.name == "N400.zip" for f in paths.download.iterdir()]):
-        print("Extracting Broderick_2019 dataset...")
+        print("Extracting Broderick_2019_the_april dataset...")
         with ZipFile(str(paths.download / zip_dset), "r") as zip:
             zip.extractall(str(paths.download))
     dsets = [
@@ -108,19 +84,19 @@ def _prepare():
     # download audio files
     zip_private = paths.download / "private.zip"
     if not zip_private.exists():
-        print("Downloading Broderick_2019 private files...")
+        print("Downloading Broderick_2019_the_april private files...")
         url = "https://ai.honu.io/papers/brainmagick/private.zip"
         urlretrieve(url, zip_private)
 
     # extract private files
     folder_private = paths.download / "private"
     if not folder_private.exists():
-        print("Extracting Broderick_2019 private files...")
+        print("Extracting Broderick_2019_the_april private files...")
         with ZipFile(str(zip_private), "r") as zip:
             zip.extractall(paths.download)
 
 
-class _BroderickMetadata:
+class _Broderick_the_aprilMetadata:
     def _parse_json(self, run_id: str) -> pd.DataFrame:
         """parse json to flatten word and phoneme into a dataframe"""
         folder = get_paths().download
@@ -254,7 +230,7 @@ class _BroderickMetadata:
         return json
 
 
-class Broderick2019Recording(api.Recording):
+class Broderick2019_the_aprilRecording(api.Recording):
 
     data_url = "https://datadryad.org/stash/dataset/doi:10.5061/dryad.070jc"
     paper_url = "https://pubmed.ncbi.nlm.nih.gov/29478856/"
@@ -265,16 +241,14 @@ class Broderick2019Recording(api.Recording):
     device = "eeg"
     description = """
     """
-    _metadata = _BroderickMetadata()
+    _metadata = _Broderick_the_aprilMetadata()
 
     @classmethod
-    def iter(cls) -> tp.Iterator["Broderick2019Recording"]:  # type: ignore
+    def iter(cls) -> tp.Iterator["Broderick2019_the_aprilRecording"]:  # type: ignore
         """Returns a generator of all recordings"""
-        print('Broderick2019Recording.iter() is called')
         # download, extract, organize
         paths = get_paths()
         _prepare()
-        print('Broderick2019  _prepare() done')
         if not spacy.util.is_package(SPACY_MODEL):
             spacy.cli.download(SPACY_MODEL)
 
@@ -306,69 +280,47 @@ class Broderick2019Recording(api.Recording):
             / f"Subject{self.subject_uid}"
             / f"Subject{self.subject_uid}_Run{self.run_id}.mat"
         )
-        print('eeg_fname',eeg_fname)
         mat = loadmat(str(eeg_fname))
 
-        # muse : skip loading the unknown npz data
         # Load .npz file with preprocessed EEG data
-        # eeg_npz_fname = (
-        #     paths.download
-        #     / "Natural Speech"
-        #     / "EEG"
-        #     / f"Subject{self.subject_uid}"
-        #     / f"Subject{self.subject_uid}_Run{self.run_id}.npz"
-        # )
-        # npz_data = np.load(str(eeg_npz_fname), allow_pickle=True)
-        # eeg_preprocessed = npz_data['X']
-        # print("Test X")
+        eeg_npz_fname = (
+            paths.download
+            / "Natural Speech"
+            / "EEG"
+            / f"Subject{self.subject_uid}"
+            / f"Subject{self.subject_uid}_Run{self.run_id}.npz"
+        )
+        npz_data = np.load(str(eeg_npz_fname), allow_pickle=True)
+        eeg_preprocessed = npz_data['aligned_Z']
 
         assert mat["fs"][0][0] == 128
         ch_types = ["eeg"] * 128
         # FIXME montage?
-        montage = mne.channels.make_standard_montage("biosemi128")
-        info = mne.create_info(montage.ch_names, 128.0, ch_types)
-        eeg_preprocessed = mat["eegData"]
+        #montage = mne.channels.make_standard_montage("biosemi128")
+        #info = mne.create_info(montage.ch_names, 128.0, ch_types)
 
         # Load customized 3D montage
-        # montage_fname = (
-        #     paths.download
-        #     / "Natural Speech"
-        #     / "EEG"
-        #     / "all_sub_pos.npz"
-        # )
-        # montage_data = np.load(str(montage_fname))
-        # montage_positions = montage_data['position']
-        # montage_names = [str(name) for name in range(len(montage_positions))]
+        montage_fname = (
+            paths.download
+            / "Natural Speech"
+            / "EEG"
+            / "all_sub_pos.npz"
+        )
+        montage_data = np.load(str(montage_fname))
+        montage_positions = montage_data['position']
+        montage_names = [str(name) for name in range(len(montage_positions))]
 
         # Create info for EEG channels
-        # ch_types = ["eeg"] * 128
-        # info = mne.create_info(montage_names, 128.0, ch_types)
+        ch_types = ["eeg"] * 128
+        info = mne.create_info(montage_names, 128.0, ch_types)
 
         # Create RawArray with preprocessed EEG data
-        
-        # Set the positions of the electrodes using the customized montage
-        # ch_pos = {montage_names[j]: montage_positions[j] for j in range(128)}
-        # montage = mne.channels.make_dig_montage(ch_pos = ch_pos)
-        raw = mne.io.RawArray(eeg_preprocessed.T, info) #  
-        raw.set_montage(montage)
-        # assert len(raw.ch_names) == 128
-        # raw.plot_sensors(show_names=True)
-        # plt.show()
-        # exit(0)
-        raw.filter(1, 50)
-        # do a 50 Hz notch filter
-        raw.notch_filter(50)
+        raw = mne.io.RawArray(eeg_preprocessed.T, info)
 
-        # info_mas = mne.create_info(
-        #    ["mastoids1", "mastoids2"], 128.0, ["misc", "misc"]
-        # )
-        # mastoids = mne.io.RawArray(mat["mastoids"].T * 1e6, info_mas)
-        # raw.add_channels([mastoids])
-        # raw = raw.pick_types(
-        #     meg=False, eeg=True, misc=False, eog=False, stim=False
-        # )
-        return raw
-        # exit(0)
+        # Set the positions of the electrodes using the customized montage
+        ch_pos = {montage_names[j]: montage_positions[j] for j in range(128)}
+        montage = mne.channels.make_dig_montage(ch_pos = ch_pos)
+        raw.set_montage(montage)
 
         #eeg = mat["eegData"].T * 1e6
         #assert len(eeg) == 128
@@ -376,12 +328,16 @@ class Broderick2019Recording(api.Recording):
         #raw.set_montage(montage)
 
         # TODO make mastoids EEG and add layout position
-        
-        #
-        #
+        #info_mas = mne.create_info(
+        #    ["mastoids1", "mastoids2"], 128.0, ["misc", "misc"]
+        #)
+        #mastoids = mne.io.RawArray(mat["mastoids"].T * 1e6, info_mas)
+        #raw.add_channels([mastoids])
 
-        
-        # return raw
+        raw = raw.pick_types(
+            meg=False, eeg=True, misc=False, eog=False, stim=False
+        )
+        return raw
 
     def _load_events(self) -> pd.DataFrame:
         # read and preprocess events from external log file

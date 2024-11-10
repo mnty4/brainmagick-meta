@@ -13,5 +13,7 @@ from .api import from_selection
 from . import schoffelen2019  # noqa
 from . import gwilliams2022  # noqa
 from . import broderick2019  # noqa
+from . import broderick2019_april  # noqa
+from . import broderick2019_the_april  # noqa
 from . import fake  # noqa
 from . import brennan2019  # noqa

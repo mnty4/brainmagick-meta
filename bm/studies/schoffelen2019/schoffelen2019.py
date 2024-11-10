@@ -43,6 +43,8 @@ def _prepare():
     url = Schoffelen2019Recording.data_url
     parent, study = url.split('/')[-2:]
     download_donders(study, path, parent=parent)
+    
+    # Download and extract private files
     derivatives = Path(path) / 'download' / 'derivatives'
     if not derivatives.exists():
         zip_derivatives = derivatives.parent / "derivatives.zip"

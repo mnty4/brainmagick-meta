@@ -16,7 +16,7 @@ import torch
 import julius
 import bm
 from bm import env
-
+# this file helps external methods use the datasets . 
 
 def _give_permission(filepath: tp.Optional[Path]) -> None:
     """Set 777 permissions for sharing more easily
@@ -68,6 +68,23 @@ class Recording:
     language: str
     device: str
     description: str
+    def __init__(self, *, subject_uid: str, recording_uid: str) -> None:
+        if not isinstance(subject_uid, str):
+            raise TypeError(f"Recording.subject_uid needs to be a str instance, got: {subject_uid}")
+        self.subject_uid = subject_uid
+        self.recording_uid = recording_uid
+        self._subject_index: tp.Optional[int] = None  # specified during training
+        self._recording_index: tp.Optional[int] = None  # specified during training
+        self._mne_info: tp.Optional[mne.Info] = None
+        # cache system
+        self._arrays: tp.Dict[tp.Tuple[int, float], mne.io.RawArray] = {}
+        self._events: tp.Optional[pd.DataFrame] = None
+
+        if env.cache is None:
+            self._cache_folder: tp.Optional[Path] = None
+        else:
+            self._cache_folder = env.cache / "studies" / self.study_name() / recording_uid
+            self._cache_folder.mkdir(parents=True, exist_ok=True, mode=0o777)
 
     # TO BE IMPLEMENTED FOR EACH STUDY #
 
@@ -116,24 +133,7 @@ class Recording:
         assert "study" not in params, ('"study" is a reserved name which cannot be used as '
                                        f'a parameter of {cls.__name__}.iter.')
 
-    def __init__(self, *, subject_uid: str, recording_uid: str) -> None:
-        if not isinstance(subject_uid, str):
-            raise TypeError(f"Recording.subject_uid needs to be a str instance, got: {subject_uid}")
-        self.subject_uid = subject_uid
-        self.recording_uid = recording_uid
-        self._subject_index: tp.Optional[int] = None  # specified during training
-        self._recording_index: tp.Optional[int] = None  # specified during training
-        self._mne_info: tp.Optional[mne.Info] = None
-        # cache system
-        self._arrays: tp.Dict[tp.Tuple[int, float], mne.io.RawArray] = {}
-        self._events: tp.Optional[pd.DataFrame] = None
-
-        if env.cache is None:
-            self._cache_folder: tp.Optional[Path] = None
-        else:
-            self._cache_folder = env.cache / "studies" / self.study_name() / recording_uid
-            self._cache_folder.mkdir(parents=True, exist_ok=True, mode=0o777)
-
+    
     def empty_copy(self: R) -> R:
         """Creates a copy of the instance, without cached information
         (for fast transfer)
@@ -189,6 +189,7 @@ class Recording:
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.recording_uid!r})"
 
+    # 1. highpass 2. sample_rate
     def preprocessed(self, sample_rate: tp.Optional[float] = None,
                      highpass: float = 0) -> mne.io.RawArray:
         """Creates and/or loads the data at a given sampling rate.
@@ -202,15 +203,22 @@ class Recording:
         highpass: float
             the frequency of the highpass filter (no high pass filter if 0)
         """
+        # print('start preprocessing', 'sample_rate',sample_rate, 'highpass',highpass)
         if sample_rate is not None and sample_rate != int(sample_rate):
-            raise ValueError(
-                "For simplicity's sake, only integer sampling rates in Hz are allowed")
+            raise ValueError("For simplicity's sake, only integer sampling rates in Hz are allowed")
         sample_rate = int(sample_rate) if sample_rate is not None else 0
         key: tp.Tuple[int, float] = (sample_rate, highpass)
         if key in self._arrays:
             return self._arrays[key]
         name = f"meg-sr{sample_rate}-hp{highpass}-raw.fif"
+
+
+
         filepath = None if self._cache_folder is None else self._cache_folder / name
+        # print('filepath',filepath)
+        # print('filepath.exists()',filepath.exists())
+        # print('self._cache_folder',self._cache_folder)
+        # print('if self._cache_folder is None',(self._cache_folder is None))
         # check is frequency matches raw
         if filepath is None or not filepath.exists():
             raw = self.raw()
@@ -228,9 +236,11 @@ class Recording:
         if not filepath.exists():
             low_mne = preprocess_mne(self.raw(), sample_rate=sample_rate, highpass=highpass)
             low_mne.save(str(filepath), overwrite=True)
-            _give_permission(filepath)  # for sharing
+            # _give_permission(filepath)  # for sharing
         self._arrays[key] = mne.io.read_raw_fif(str(filepath), preload=False)
         self.mne_info  # populate mne info cache.
+
+        # exit(0)
         return self._arrays[key]
 
     @staticmethod
@@ -252,20 +262,54 @@ class Recording:
         clean: bool
             only returns lines which can be cast as an Event type
         """
-
+        # print("[Recording] calling events")
+        # skip cache 
+        # print("!!!!!!!!!!!! Skipping cache for events in studies/api.py")
+        # cache_file = self._cache_folder / "events.csv"
+        # print('event file does not exist, loading events')
+        # self._events = self._load_events()
+        # self._write_to_cache(self._events, cache_file)
+        
         if self._events is None:
             if self._cache_folder is None:
                 self._events = self._load_events()
-            else:
+            else:                
                 cache_file = self._cache_folder / "events.csv"
                 if cache_file.exists():
+                    print('event file already exists')
+                    # just read the csv file using pandas.
                     self._events = self._read_from_cache(cache_file)
+                    # print('events loaded')
+                    # print(self._events)
+                    # exit(0)
                 else:
+                    print('event file does not exist, loading events')
                     self._events = self._load_events()
                     self._write_to_cache(self._events, cache_file)
-        events = self._events
+        events = self._events # get a copy and return 
 
         return events
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #     def get_super_blocks(self, num_super_blocks: tp.Optional[int] = None,
 #                          sentence_blocks: bool = False) -> tp.Dict[int, tp.Tuple[float, float]]:
@@ -360,12 +404,11 @@ def preprocess_mne(
     info = mne.Info(**info_kwargs)
     # check that layout works
     layout = mne.find_layout(info)  # noqa
-    return mne.io.RawArray(data.numpy(), info=info)
+    return mne.io.RawArray(data.numpy(), info=info,verbose=False)
 
 
 def list_selections() -> tp.List[tp.Tuple[tp.Type[Recording], tp.Dict[str, tp.Any]]]:
     """Lists all the preselections in selections_definitions.yaml
-
     Returns
     -------
     list

@@ -16,22 +16,25 @@ from dora import to_absolute_path
 def download_osf(
     study: str, dset_dir: tp.Union[str, Path], success="osf_download.txt"
 ):
-    """"""
+
+    print('dset_dir',dset_dir)
     dset_dir = to_absolute_path(Path(dset_dir))
+    print("+++++++++++++++++++++++++++")
+    print('dset_dir',dset_dir)
+    
     assert dset_dir.parent.exists()
     dl_dir = dset_dir / "download"
 
     success_file = dl_dir / success
     if success_file.exists():
         return
-    print(f"Downloading {study} to {dl_dir.name}...")
-
+    print(f"Downloading {study} to {dl_dir}...")
     project = OSF().project(study)
 
     store = list(project.storages)
     assert len(store) == 1
     assert store[0].name == "osfstorage"
-
+    
     pbar = tqdm()
     for source in store[0].files:
         path = source.path
@@ -53,6 +56,11 @@ def download_osf(
     print("Done!")
 
 
+
+# To donwload manually, we can https://webdav.data.ru.nl/dccn/DSC_3011020.09_236_v1/ 
+# and login with the following credentials:
+# user
+# password
 def download_donders(study, dset_dir, parent="dccn", overwrite=False):
     dset_dir.mkdir(exist_ok=True, parents=True)
     success = dset_dir / "download" / "success.txt"
@@ -60,11 +68,23 @@ def download_donders(study, dset_dir, parent="dccn", overwrite=False):
         print(f"Downloading {study} to {dset_dir}...")
         user = input("user:").strip()
         password = input("password:").strip()
-
         command = "wget -r -nH -np --cut-dirs=1"
-        command += " --no-check-certificate -U Mozilla"
-        command += f" --user={user} --password={password}"
-        command += f" https://webdav.data.donders.ru.nl/{parent}/{study}/"
+        command += " -U Mozilla"
+        command += f" --user=0000-0002-6620-604x@orcid.org --password=SXKCBX5XGELJXE7YPTTJCXDYTI"
+        command += f" https://webdav.data.ru.nl/dccn/DSC_3011020.09_236_v1"
+
+
+
+        #user 0000-0002-6620-604x@orcid.org
+        #password SXKCBX5XGELJXE7YPTTJCXDYTI
+        # command = "wget -r -nH -np --cut-dirs=1"
+        # command += " --no-check-certificate -U Mozilla"
+        # command += f" --user={user} --password={password}"
+        # command += f" https://webdav.data.donders.ru.nl/{parent}/{study}/"
+        # print('?????????????????') #https://webdav.data.ru.nl/dccn/DSC_3011020.09_236_v1
+        # print(f">>>>> https://webdav.data.donders.ru.nl/{parent}/{study}/")
+        # print('?????????????????')
+
         command += f" -P {dset_dir}"
         command += ' -R "index.html*" -e robots=off'
         command += ' --show-progress'

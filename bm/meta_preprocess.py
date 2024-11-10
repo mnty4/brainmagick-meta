@@ -1,4 +1,3 @@
-import torch.nn.functional as F
 import pickle
 import json
 from sklearn.model_selection import train_test_split
@@ -6,7 +5,7 @@ from collections import defaultdict
 from mne.time_frequency import Spectrum
 from sklearn.model_selection import ShuffleSplit
 import pandas as pd
-from mne.io import Raw, RawArray
+from mne.io import Raw
 import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
@@ -17,26 +16,31 @@ import typing as tp
 import torch
 from hydra import initialize, compose
 import hydra
-from typing import Tuple
 import os
 from functools import lru_cache
 import functools
 from tqdm import tqdm
 import torch.utils
 import torch.utils.data
-from bm.setup_logging import configure_logging
+from setup_logging import configure_logging
 # from . import env
 # from .cache import Cache
-from .dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
-from .train import override_args_
-from .speech_embeddings import SpeechEmbeddings
+from bm.dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
+from bm.train import override_args_
+from speech_embeddings import SpeechEmbeddings
 from frozendict import frozendict
-
+from _env import Env as env  # we need this here otherwise submitit pickle does crazy stuff.
 from dora.log import LogProgress
+import sys
+from joblib import Parallel, delayed
+import threading
+# SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# print("SCRIPT_DIR",SCRIPT_DIR)
+# sys.path.append(os.path.dirname(SCRIPT_DIR))
 
 logger = logging.getLogger(__name__)
 
-base = os.path.dirname(os.path.abspath(__file__))
+base = "/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm/" #= os.path.abspath
 
 def list_to_tuple(function: tp.Callable) -> tp.Any:
     """Custom decorator function, to convert list to a tuple."""
@@ -73,9 +77,9 @@ def deep_freeze_args(func):
         return func(*deep_freeze(args), **deep_freeze(kwargs))
     return wrapped
 
-# @list_to_tuple
-# @deep_freeze_args
-# @lru_cache(typed=True)
+@list_to_tuple
+@deep_freeze_args
+@lru_cache(typed=True)
 def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         n_recordings: int,
         test_ratio: float,
@@ -99,67 +103,69 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
         n_subjects_test: tp.Optional[int] = None,
         remove_ratio: float = 0.,
         **factory_kwargs: tp.Any):
+    print('[meta_preprocess.get_raw_events] selections',selections)
+    # (frozendict.frozendict({'study': 'gwilliams2022'}),)
 
     # get from running gwilliams study
     logger.info(f'Loading recordings...')
     all_recordings = _extract_recordings(
         selections, n_recordings, skip_recordings=skip_recordings,
     shuffle_recordings_seed=shuffle_recordings_seed)
-    all_recordings = LogProgress(logger, all_recordings,
-                                      name="Preparing cache", level=logging.DEBUG)
-    all_recordings = [  # for debugging
-        _preload(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings]
-    
-    print(all_recordings)
+    # print('all_recordings',all_recordings,selections)
+    """
+        all_recordings 
+        [
+        Gwilliams2022Recording('01_session0_story0'), 
+        Gwilliams2022Recording('01_session0_story1'),
+        Gwilliams2022Recording('01_session0_story2'), 
+        Gwilliams2022Recording('01_session0_story3'), 
+        Gwilliams2022Recording('01_session1_story0'), 
+        Gwilliams2022Recording('01_session1_story1'), 
+        Gwilliams2022Recording('01_session1_story2'), 
+        Gwilliams2022Recording('01_session1_story3'), 
+        Gwilliams2022Recording('02_session0_story0'), 
+        Gwilliams2022Recording('02_session0_story1'), 
+        ...        
+    """
+    all_recordings = LogProgress(
+            logger, 
+            all_recordings,        
+            name="Preparing cache", 
+            level=logging.DEBUG
+            )
+    # pre_load_Recordings = []    
+    # for s in all_recordings:
+    #     print('preloading',s,s.study_name(),'story',s.story, 'session',s.session,'_subject_index',s._subject_index,'_recording_index',s._recording_index)
 
-    raws = [recording.preprocessed(128, 0).load_data() for recording in all_recordings]
+    #     # denbugging
+    #     if not s._subject_index>7 :
+    #         break
+    #     # if not s._subject_index==14 and not int(s.session) == 1:
+    #     #     continue
+    #     preloaded_data = _preload(s, sample_rate=sample_rate, highpass=highpass)
+    #     print('preloaded finished')
+    #     print('_cache_folder',s._cache_folder)
+    #     pre_load_Recordings.append(preloaded_data)        
+    # # all_recordings = [  # for debugging
+    # #     _preload(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings]
+    # all_recordings = pre_load_Recordings
+
+
+    preloaded_data_list = Parallel(n_jobs=32)(delayed(_preload)(s, sample_rate=sample_rate, highpass=highpass) for s in all_recordings)
+    all_recordings = preloaded_data_list
+
+    # para
+
+
+    # print("all_recordings",all_recordings)
+    raws = [recording.preprocessed(120, 0) for recording in all_recordings]
     events = [recording.events() for recording in all_recordings]
     infos = [recording.mne_info for recording in all_recordings]
+    print('len(raws)',len(raws),'len(events)',len(events),'len(infos)',len(infos))
+    
     logger.info(f'Recordings loaded succesfully.')
     return raws, events, infos
 
-def apply_baseline(raw, data):
-    baseline_start, baseline_end = 0, 0.5
-
-    baseline_idx = np.logical_and(raw.times >= baseline_start, raw.times <= baseline_end)
-
-    baseline_mean = data[:, baseline_idx].mean(axis=1, keepdims=True)
-
-    clamped_data = data - baseline_mean
-    return clamped_data
-
-def normalise(data):
-    std = np.std(data, axis=1, keepdims=True)
-    mean = np.mean(data, axis=1, keepdims=True)
-    normalised = (data - mean) / std
-    return normalised
-
-def apply_clamp(data):
-
-    mean = data.mean(axis=1, keepdims=True)
-    std_dev = data.std(axis=1, keepdims=True)
-    min_val = mean - 20 * std_dev
-    max_val = mean + 20 * std_dev
-    clamped_data = np.clip(data, min_val, max_val)
-
-    return clamped_data
-
-def apply_noise(data):
-    return np.random.normal(loc=0, scale=1, size=data.shape)
-
-# inplace
-def preprocess_raws(raws, random_noise=False, **kwargs):
-    for raw in raws:
-        data = raw.get_data()
-        if random_noise:
-            data = apply_noise(data)
-        else:
-            data = apply_baseline(raw, data)
-            data = apply_clamp(data)
-            data = normalise(data)
-
-        raw._data = data
-        
 
 def preprocess_words(save_dir='preprocessed', **kwargs):
     save_path = os.path.join(base, save_dir)
@@ -167,15 +173,13 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
 
     raws, events, infos = get_raw_events(**kwargs)
 
-    preprocess_raws(raws, **kwargs)
-    
     word_index = {}
     word_index_path = os.path.join(save_path, f'word_index.pt')
     if os.path.exists(word_index_path):
         with open(word_index_path, "rb") as f:
             word_index = torch.load(f, weights_only=True)
-
-    subs, word_index, additional_info = preprocess_recordings(raws, events, infos, word_index, **kwargs)
+    subs, word_index = preprocess_recordings_pararrel(raws, events, infos, word_index, **kwargs)
+    # subs, word_index = preprocess_recordings(raws, events, infos, word_index, **kwargs)
     logger.info(f'Saving tensors to "{save_path}"...')
     for sub in subs:
         torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
@@ -183,7 +187,7 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
     with open(word_index_path, "wb") as f:
         torch.save(word_index, f)
     logger.info(f'Save successful.')
-    return subs, word_index, additional_info
+    return subs, word_index
 
 def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     subs_list = subs.values()
@@ -198,17 +202,107 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     # return train, valid, test
     
 
-def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs) -> Tuple[dict, dict, dict]:
 
-    generate_embeddings = SpeechEmbeddings()
+def _extract(raw, event, info, offset = 0., n_fft = 60, **kwargs):
+    thread_id = threading.get_ident()
+    word_index = {}
+    subs = defaultdict(list)
+    word_count = 0
+    generate_embeddings = SpeechEmbeddings() 
+    print('Thread',thread_id,'_extract from raw',type(raw),'event',type(event),'info',type(info),info)
+
+    # declare variables
+    raw: Raw
+    event: pd.DataFrame    
+    word_events: pd.DataFrame = event[event['kind'] == 'word']
+    # raw.annotations.to_data_frame().info()
+    # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
+    # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
+    sub_id = info['subject_info']['his_id']
+
+    x = []
+    y = []
+    w_lbs = []
+    
+    # for (i, word_event), start in zip(word_events.iterrows(), starts):
+    for i, word_event in word_events.iterrows():
+    
+        raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
+
+        wav_path = wav_path.lower()
+        # add the root folder:
+        # /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl/download/stimuli
+        wav_path = os.path.join('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl/download/', wav_path)
+        # check if this path exists
+        # print('wav_path',wav_path,'exists',os.path.exists(wav_path))
+        # stimuli/audio/lw1_0.wav
+        # print('wav_path',wav_path)
+
+        raw_start = raw_start + offset
+        end = raw_start + duration + offset
+
+        t_idxs = raw.time_as_index([raw_start, end])
+        data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+        if data.shape[-1] < n_fft:
+            continue
+
+        spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, n_fft=n_fft, verbose=False)
+        # spectrums.plot(picks="data", exclude="bads", amplitude=False)
+        data, freqs = spectrums.get_data(return_freqs=True)
+        # assert len(freqs) == 8
+        # print('data',type(data),'freqs',type(freqs))            
+        audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration)
+        if word_label in word_index:
+            word_id = word_index[word_label]
+        else:
+            word_id = word_count
+            word_index[word_label] = word_count
+            word_count += 1
+        # print('Thread',thread_id, f'Extracted word: {word_label}, PSD: {torch.tensor(data).shape}, audio_embedding: {torch.tensor(audio_embedding).shape}')
+        x.append(data)
+        y.append(audio_embedding)
+        w_lbs.append(word_id)
+    x = torch.tensor(np.array(x))
+    w_lbs = torch.tensor(w_lbs)
+    subs[sub_id].append((x, y, w_lbs))
+    return subs, word_index
+        
+def preprocess_recordings_pararrel(raws, events, infos, word_index=None, offset = 0., n_fft = 60, **kwargs) -> dict:
+    # generate_embeddings = SpeechEmbeddings() # generator . 
+    # Global variables
+    subs = defaultdict(list)
+    word_index = word_index or {}
+    word_count = 0.
+    print('[preprocess_recordings_pararrel],len(raws)',len(raws),'len(events)',len(events),'len(infos)',len(infos))
+    # [preprocess_recordings_pararrel],len(raws) 196 len(events) 196 len(infos) 196
+    # for debuging, let only do 3 recordings
+    # raws = raws[:3]
+    # events = events[:3]
+    # infos = infos[:3]
+    logger.info('Preprocessing recordings in Parallel...')
+    results = Parallel(n_jobs=16)(delayed(_extract)(raw, event, info, offset=offset, n_fft=n_fft, **kwargs) for raw, event, info in tqdm(zip(raws, events, infos)))
+    for subs, word_index in results:
+        # merge results by adding to global variables  
+        for sub_id in subs:
+            subs[sub_id].extend(subs[sub_id])
+        # merge word_index by adding 
+        for word in word_index:
+            if word in word_index:
+                word_index[word] += word_index[word]
+            else:
+                word_index[word] = word_index[word]
+    print('Recordings preprocessed successfully.')
+    print('word_index',word_index)
+
+    return subs, word_index
+
+def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 60, **kwargs) -> dict:
+
+    generate_embeddings = SpeechEmbeddings() # generator . 
     subs = defaultdict(list)
     word_index = word_index or {}
     word_count = 0.
     logger.info('Preprocessing recordings...')
-    segment_lengths = []
-    durations = []
-    min_audio_embedding = float('inf')
-    max_audio_embedding = 0
     for raw, event, info in tqdm(zip(raws, events, infos)):
         raw: Raw
         event: pd.DataFrame
@@ -218,86 +312,67 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
         # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
         sub_id = info['subject_info']['his_id']
-        
-        story_id = float(word_events.iloc[0]['story_uid'])
 
         x = []
         y = []
         w_lbs = []
-        skipped = 0
+        
+        # for (i, word_event), start in zip(word_events.iterrows(), starts):
         for i, word_event in word_events.iterrows():
         
             raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
 
             wav_path = wav_path.lower()
+            # add the root folder:
+            # /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl/download/stimuli
+            wav_path = os.path.join('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl/download/', wav_path)
+            # check if this path exists
+            # print('wav_path',wav_path,'exists',os.path.exists(wav_path))
+            # stimuli/audio/lw1_0.wav
+            # print('wav_path',wav_path)
 
             raw_start = raw_start + offset
-            raw_end = raw_start + duration
+            end = raw_start + duration + offset
 
-            t_idxs = raw.time_as_index([raw_start, raw_end])
+            t_idxs = raw.time_as_index([raw_start, end])
             data, times = raw[:, t_idxs[0]:t_idxs[1]] 
-
-            segment_lengths.append(data.shape[-1])
-            durations.append(duration)
-            if data.shape[-1] <= n_fft // 4:
-                skipped += 1
+            if data.shape[-1] < n_fft:
                 continue
-            #     # pad with zeros if too short for window
-            #     to_pad = n_fft - data.shape[-1]
-            #     data = np.pad(data, ((0, 0), (0, to_pad)), "constant")
-            #     # continue
-            
-            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
+
+            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=end, fmax=60, n_fft=n_fft, verbose=False)
             # spectrums.plot(picks="data", exclude="bads", amplitude=False)
-        #     spectrums.plot_topomap(bands = {'Delta (0-4 Hz)': (0, 4), 'Theta (4-8 Hz)': (4, 8),
-        #  'Alpha (8-12 Hz)': (8, 12), 'Beta (12-30 Hz)': (12, 30),
-        #  'Gamma (30-45 Hz)': (30, 45)}, normalize=True)
             data, freqs = spectrums.get_data(return_freqs=True)
-
-            audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
-                                                                       audio_embedding_length=audio_embedding_length)
-
+            # assert len(freqs) == 8
+            # print('data',type(data),'freqs',type(freqs))            
+            audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration)
             if word_label in word_index:
                 word_id = word_index[word_label]
             else:
                 word_id = word_count
                 word_index[word_label] = word_count
                 word_count += 1
-
             # print(f'word: {word_label}, audio features: {torch.tensor(audio_label).shape}, PSD: {torch.tensor(data).shape}')
             x.append(data)
             y.append(audio_embedding)
             w_lbs.append(word_id)
-
-        x = torch.tensor(np.array(x)).to(torch.float32)
-        y = torch.stack(y).to(torch.float32)
-        w_lbs = torch.tensor(w_lbs).to(torch.int64)
-
-        trial = {
-            'story_uid': story_id,
-            'sub_id': sub_id,
-            'eeg': x,
-            'audio': y,
-            'w_lbs': w_lbs,
-        }
-        subs[sub_id].append(trial)
-        logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
-    word_index.update({i: w for w, i in word_index.items()})
+        x = torch.tensor(np.array(x))
+        w_lbs = torch.tensor(w_lbs)
+        subs[sub_id].append((x, y, w_lbs))
     logger.info('Recordings preprocessed successfully.')
-    
-    return subs, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
+    print('word_index',word_index)
+
+    return subs, word_index
 
 def preprocess_words_test(**kwargs):
-    subs, word_index, additional_info = preprocess_words(save_dir='preprocessed', **kwargs)
+    subs, word_index = preprocess_words(save_dir='preprocessed', **kwargs)
     save_path = os.path.join(base, 'preprocessed')
+    # print("[preprocess_words_test] save_path",save_path)
+    
     for sub in subs:
         saved = torch.load(os.path.join(save_path, f'{sub}.pt'), weights_only=True)
-        for trial, trial_c in zip(subs[sub], saved):
-            assert len(trial['eeg']) == len(trial_c['eeg'])
+        assert len(subs[sub]) == len(saved)
     saved = torch.load(os.path.join(save_path, f'word_index.pt'), weights_only=True)
     assert len(word_index) == len(saved)
-    logger.info('Tests passed successfully.')
 
 
 def run(args):
@@ -309,11 +384,7 @@ def run(args):
         kwargs['extra_test_features'].append("WordHash")
 
     # return get_raw_events(**kwargs, num_workers=args.num_workers)
-    # return preprocess_words_test(**kwargs, num_workers=args.num_workers)
-
-    kwargs['offset'] = 0.15
-
-    return preprocess_words(**kwargs, num_workers=args.num_workers, random_noise=True)
+    return preprocess_words_test(**kwargs, num_workers=args.num_workers)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:
@@ -324,14 +395,14 @@ def main(args: tp.Any) -> float:
     # Fix bug when using multiprocessing with Hydra
     __file__ = hydra.utils.to_absolute_path(__file__)
 
-    from . import env  # we need this here otherwise submitit pickle does crazy stuff.
+    
     # Updating paths in config that should stay relative to the original working dir
-    with env.temporary_from_args(args):
-        torch.set_num_threads(1)
-        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
-        logger.info(f"Caching intermediate data under {args.cache}.")
-        logger.debug(args)
-        return run(args)
+    # with env.temporary_from_args(args):
+    #     torch.set_num_threads(1)
+    #     logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+    #     logger.info(f"Caching intermediate data under {args.cache}.")
+    #     logger.debug(args)
+    return run(args)
 
 
     if '_BM_TEST_PATH' in os.environ:

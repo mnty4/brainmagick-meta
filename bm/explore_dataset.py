@@ -6,64 +6,49 @@ import numpy as np
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from omegaconf import OmegaConf
-from dora import hydra_main
 import logging
 import typing as tp
 import torch
-from hydra import initialize, compose
-import hydra
-import os
+import functools, sys, os
 from functools import lru_cache
-import functools
 
 import torch.utils
 import torch.utils.data
+from hydra import initialize, compose
+import hydra
+from speech_embeddings import SpeechEmbeddings
+from bm.setup_logging import configure_logging
+"""
+# from bm import env
+bm.env Env(cache=None,feature_models=None,studies={'gwilliams2022': PosixPath('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl'), 'schoffelen2019': PosixPath('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/schoffelen2019')})
+"""
+# print("bm.env",env)
+# exit(0)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+print("SCRIPT_DIR",SCRIPT_DIR)
+sys.path.append(os.path.dirname(SCRIPT_DIR))
 # from . import env
 # from .cache import Cache
+
 from bm.dataset import _extract_recordings, _preload, assign_blocks, SegmentDataset
 from bm.train import override_args_
-from bm.speech_embeddings import SpeechEmbeddings
+from meta_preprocess import get_raw_events,preprocess_words_test
+from meta_preprocess2 import preprocess_words_test as preprocess_words_test_2
 from frozendict import frozendict
-from bm.meta_preprocess import get_raw_events
-
-from dora.log import LogProgress
-
+import mne
+mne.set_log_level("ERROR")
+# from bm.speech_embeddings import SpeechEmbeddings
+# 
+print("explore_dataset.py import ok")
+# from dora.log import LogProgress
 logger = logging.getLogger(__name__)
+# from dora import hydra_main
 
 def get_dataset(**kwargs):
-
-    raws, events = get_raw_events(**kwargs)
-
+    raws, events, info = get_raw_events(**kwargs)
     # train, val, test = split_subjects(raws, events)
-
-    dset = MetaDataset(raws, events, offset=0.)
-
-    return dset
-
-# def split(raws, events, train = 0.7, val = 0.2, test = 0.1):
-#     assert len(raws) == len(events)
-
-#     n = len(raws)
-
-#     tr = int(train * n)
-#     va = int(val * n)
-#     te = int(test * n)
-
-#     # if samples are missed, add them to test
-#     te += n - (tr + va + te)
-
-#     train_split, val_split, test_split = [], [], []
-
-#     train_split = {'raws': raws[:]}
-
-#     for i in range(tr):
-#         train_split.append(raws[i])
-
-    
-
-    
-        
-
+    dataset = MetaDataset(raws, events, offset=0.)
+    return dataset
 
 def get_dataloaders(train_dset, val_dset):
     train_dataloader = DataLoader(train_dset, batch_size=64, shuffle=True)
@@ -157,6 +142,7 @@ class MetaDataset(Dataset):
         # load datasets into self.datasets
         self.datasets = datasets
         self.len = len(self.datasets)
+        print("len of datasets", self.len)
 
     def __len__(self):
         return self.len
@@ -247,54 +233,6 @@ class TrialDataset(Dataset):
     #     # y^[0]: FxT 
     #     pass
 
-
-# dataset which takes n_shot, n_way
-# class CustomDataset(Dataset):
-#     def __init__(self, db, mode, k_shot, k_query) -> None:
-#         super().__init__()
-#         # self.data = data
-#         self.db = db
-#         self.mode = mode
-#         self.shape = (len(db.subj[mode]), db.n_way, db.num_trials) + db.eeg_shape
-#         self.n_way = self.shape[1]
-#         self.k_shot = k_shot
-#         self.k_query = k_query
-#         self.out_shape = (self.n_way * self.k_shot,) + self.shape[-2:]
-#         self.out_shape_query = (self.n_way * self.k_query,) + self.shape[-2:]
-#         self.shuffle_idx = np.zeros(self.shape[:3], dtype=int)
-#         for p in range(self.shape[0]):
-#             for q in range(self.shape[1]):
-#                 idx_range = np.arange(self.shape[2])
-#                 np.random.shuffle(idx_range)
-#                 self.shuffle_idx[p, q, ...] = idx_range
-
-#     def __len__(self):
-#         return self.shape[0] * (self.shape[2] // (self.k_shot + self.k_query))
-
-#     def __getitem__(self, idx):
-#         idx2 = (self.k_shot + self.k_query) * (idx // self.shape[0])
-#         idx0 = idx % self.shape[0]
-
-#         support_x = np.zeros(self.out_shape)
-#         support_y = np.zeros(self.out_shape[:1], dtype=int)
-#         query_x = np.zeros(self.out_shape_query)
-#         query_y = np.zeros(self.out_shape_query[:1], dtype=int)
-
-#         for j in range(self.n_way):
-#             # support_x[(j*self.k_shot):((j+1)*self.k_shot), ...] = self.data[idx0][j][self.shuffle_idx[idx0, j, idx2:idx2+self.k_shot]]
-#             for v in range(self.k_shot):
-#                 support_x[(j*self.k_shot) + v, ...] = self.db.get_data(self.mode, self.db.subj[self.mode][idx0], j, self.shuffle_idx[idx0, j, idx2+v])
-#             support_y[(j*self.k_shot):((j+1)*self.k_shot)] = j
-
-#             # query_x[(j*self.k_query):((j+1)*self.k_query), ...] = self.data[idx0][j][self.shuffle_idx[idx0, j, idx2+self.k_shot:idx2+self.k_shot+self.k_query]]
-#             for v in range(self.k_query):
-#                 query_x[(j*self.k_query) + v, ...] = self.db.get_data(self.mode, self.db.subj[self.mode][idx0], j, self.shuffle_idx[idx0, j, idx2+self.k_shot+v])
-#             query_y[(j*self.k_query):((j+1)*self.k_query)] = j
-
-#         return support_x, support_y, query_x, query_y
-
-
-
 def run(args):
     kwargs: tp.Dict[str, tp.Any]
     kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
@@ -309,26 +247,113 @@ def run(args):
 def main(args: tp.Any) -> float:
     print('hello there good sir.')
     override_args_(args)
-
     global __file__  # pylint: disable=global-statement,redefined-builtin
     # Fix bug when using multiprocessing with Hydra
     __file__ = hydra.utils.to_absolute_path(__file__)
-
-    from . import env  # we need this here otherwise submitit pickle does crazy stuff.
+    from bm import env  # we need this here otherwise submitit pickle does crazy stuff.
     # Updating paths in config that should stay relative to the original working dir
     with env.temporary_from_args(args):
         torch.set_num_threads(1)
         logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
         logger.info(f"Caching intermediate data under {args.cache}.")
         logger.debug(args)
+        print("running run")
         return run(args)
+    if '_BM_TEST_PATH' in os.environ:
+        main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
+def explore_Gwilliams2022():
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+        # print(OmegaConf.to_yaml(cfg))  
+    dset = main(cfg)    
+    for i in range(10):
+        print(dset[i],type(dset[i]))
+        break
+
+
+
+def run_preprocess_gwilliams(args):
+    kwargs: tp.Dict[str, tp.Any]
+    kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
+    selections = [args.selections[x] for x in args.dset.selections]
+    kwargs["selections"] = selections
+    if args.optim.loss == "clip":
+        kwargs['extra_test_features'].append("WordHash")
+
+    # return get_raw_events(**kwargs, num_workers=args.num_workers)
+    return preprocess_words_test(**kwargs, num_workers=args.num_workers)
+
+def preprocess_Gwilliams2022():
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+    configure_logging()
+    args = cfg
+    override_args_(args)
+    global __file__  # pylint: disable=global-statement,redefined-builtin
+    # Fix bug when using multiprocessing with Hydra
+    __file__ = hydra.utils.to_absolute_path(__file__)
+
+    from bm import env  # we need this here otherwise submitit pickle does crazy stuff.
+    # Updating paths in config that should stay relative to the original working dir
+    with env.temporary_from_args(args):
+        torch.set_num_threads(1)
+        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+        logger.info(f"Caching intermediate data under {args.cache}.")
+        logger.debug(args)
+        return run_preprocess_gwilliams(args)
 
     if '_BM_TEST_PATH' in os.environ:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
-if __name__ == "__main__":
+
+
+
+def run_preprocess_gwilliams_2(args):
+    kwargs: tp.Dict[str, tp.Any]
+    kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
+    selections = [args.selections[x] for x in args.dset.selections]
+    kwargs["selections"] = selections
+    if args.optim.loss == "clip":
+        kwargs['extra_test_features'].append("WordHash")
+
+    # return get_raw_events(**kwargs, num_workers=args.num_workers)
+    return preprocess_words_test_2(**kwargs, num_workers=args.num_workers)
+
+def preprocess_Gwilliams2022_2():
     with initialize(version_base="1.1", config_path="conf"):
         cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+    configure_logging()
+    args = cfg
+    override_args_(args)
+    global __file__  # pylint: disable=global-statement,redefined-builtin
+    # Fix bug when using multiprocessing with Hydra
+    __file__ = hydra.utils.to_absolute_path(__file__)
+
+    from bm import env  # we need this here otherwise submitit pickle does crazy stuff.
+    # Updating paths in config that should stay relative to the original working dir
+    with env.temporary_from_args(args):
+        torch.set_num_threads(1)
+        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+        logger.info(f"Caching intermediate data under {args.cache}.")
+        logger.debug(args)
+        return run_preprocess_gwilliams_2(args)
+
+    if '_BM_TEST_PATH' in os.environ:
+        main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
+
+
+def explore_schoffelen():
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config_schoffelen.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+        # print(OmegaConf.to_yaml(cfg))    
     dset = main(cfg)
+    for i in range(10):
+        print(dset[i])
+        break
     
+if __name__ == "__main__":
+    # explore_Gwilliams2022()
+    # preprocess_Gwilliams2022()
+    preprocess_Gwilliams2022_2()
+    # explore_schoffelen()
