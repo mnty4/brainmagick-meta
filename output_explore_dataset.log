@@ -1,0 +1,17 @@
+This is a print statement.
+SCRIPT_DIR /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm
+explore_dataset.py import ok
+[_extract_recordings]: selections [{'study': 'gwilliams2022'}]
+!!!! [Gwilliams2022Recording], skipping download in line 63
+ [Gwilliams2022Recording] subject_file, /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl/download/participants.tsv  file exists: True
+all_recordings <class 'list'> 196
+Debugging mode, reducing the number of recordings to 16
+_preload
+done _preload
+Finished getting raw events in: 30.768750190734863
+_meg_eeg_preprocess/brainmagick/bm.
+2024-11-13 14:30:27,582 - INFO - Caching intermediate data under /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm/cache.
+2024-11-13 14:30:27,639 - INFO - Loading recordings...
+2024-11-13 14:30:28,275 - WARNING - Requested 1000 recordings but only found 196
+2024-11-13 14:30:58,408 - INFO - Recordings loaded succesfully.
+2024-11-13 14:31:19,444 - INFO - Preprocessing recordings...
