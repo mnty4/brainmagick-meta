@@ -1,6 +1,8 @@
+from collections import defaultdict
 from sklearn.model_selection import ShuffleSplit
 import pandas as pd
 from mne.io import Raw
+from mne.time_frequency import Spectrum
 import json
 import numpy as np
 from pathlib import Path
@@ -32,13 +34,14 @@ logger = logging.getLogger(__name__)
 
 def get_dataset(**kwargs):
 
-    raws, events = get_raw_events(**kwargs)
+    raws, events, info = get_raw_events(**kwargs)
 
     # train, val, test = split_subjects(raws, events)
 
     dset = MetaDataset(raws, events, offset=0.)
 
     return dset
+
 
 # def split(raws, events, train = 0.7, val = 0.2, test = 0.1):
 #     assert len(raws) == len(events)
@@ -111,6 +114,143 @@ def get_dataloaders(train_dset, val_dset):
     #             logger.warning(f'No blocks found for split {j + 1}/{len(factories)} of '
     #                            f'recording {i + 1}/{n_recordings}.')
     # print(dsets_per_split)
+
+def split_recordings(raws, events, infos, offset = 0., n_fft = 120):
+
+    generate_embeddings = SpeechEmbeddings()
+    subs = defaultdict(list)
+    for raw, event, info in zip(raws, events, infos):
+        raw: Raw
+        event: pd.DataFrame
+        
+        word_events: pd.DataFrame = event[event['kind'] == 'word']
+        raw.annotations.to_data_frame().info()
+        descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
+        starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
+        sub_id = info['subject_info']['his_id']
+
+        x = []
+        y = []
+        w_lbs = []
+        
+        for (i, word_event), start in zip(word_events.iterrows(), starts):
+        
+            duration, word_label, wav_path = word_event['duration'], word_event['word'], word_event['sound'] 
+
+            wav_path = wav_path.lower()
+
+            start = start + offset
+            end = start + duration + offset
+            
+            # print(start, end, wav_path, word_label)
+            t_idxs = raw.time_as_index([start, end])
+            data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+            if data.shape[-1] < n_fft:
+                continue
+
+            spectrums: Spectrum = raw.compute_psd(tmin=start, tmax=end, fmax=60, n_fft=n_fft)
+            # spectrums.plot(picks="data", exclude="bads", amplitude=False)
+            data, freqs = spectrums.get_data(return_freqs=True)
+            assert len(freqs) == 8
+            
+            # print('should have 8 freq bins: ', len(freqs))
+            # preprocessed_data = to_spectrum(data)
+            # bands = julius.split_bands(torch.Tensor(data), n_bands=10, sample_rate=120)
+
+            audio_label = generate_embeddings.get_audio_embeddings(wav_path, start, duration)
+
+            # print(f'word: {word_label}, audio features: {torch.tensor(audio_label).shape}, PSD: {torch.tensor(data).shape}')
+            x.append(data)
+            y.append(audio_label)
+            w_lbs.append(word_label)
+        # X.append(x)
+        # Y.append(y)
+        # word_labels.append(w_lbs)
+
+        subs[sub_id].append((x, y, w_lbs))
+    return subs
+
+class TrialsDataset(Dataset):
+    def __init__(self, trials, transform=None, **kwargs) -> None:
+        self.transform = transform
+        self.trials = trials
+
+    def __len__(self):
+        return len(self.trials)
+
+    def __getitem__(self, idx):
+        trial = self.trials[idx]
+        if self.transform:
+            sub = self.transform(sub)
+        return trial
+class SubDataset(Dataset):
+    def __init__(self, subs, sub_ids, transform=None, **kwargs) -> None:
+        self.transform = transform
+        self.subs = subs
+        self.sub_ids = sub_ids
+
+    def __len__(self):
+        return len(self.subs)
+
+    def __getitem__(self, idx):
+        sub, sub_id = self.subs[idx], self.sub_ids[idx]
+        if self.transform:
+            sub = self.transform(sub)
+        return sub, sub_id
+
+class MetaDataset_v2(Dataset):
+    def __init__(self, raws, events, infos, transform=None, offset = 0., **kwargs) -> None:
+
+        self.transform = transform
+        generate_embeddings = SpeechEmbeddings()
+        subs = defaultdict(list)
+        for raw, event, info in zip(raws, events, infos):
+            raw: Raw
+            event: pd.DataFrame
+
+            word_events: pd.DataFrame = event[event['kind'] == 'word']
+            descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
+            starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
+            sub_id = info['subject_info']['his_id']
+
+            x = []
+            y = []
+            w_lbs = []
+            
+            for (i, word_event), start in zip(word_events.iterrows(), starts):
+            
+                duration, word_label, wav_path = word_event['duration'], word_event['word'], word_event['sound'] 
+
+                wav_path = wav_path.lower()
+                
+                if duration < 0.05:
+                    continue
+
+                start = start + offset
+                end = start + duration + offset
+                print(start, end, wav_path, word_label)
+                t_idxs = raw.time_as_index([start, end])
+                data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+                audio_label = generate_embeddings.get_audio_embeddings(wav_path, start, duration)
+ 
+                x.append(data)
+                y.append(audio_label)
+                w_lbs.append(word_label)
+
+            subs[sub_id].append((x, y, w_lbs))
+
+        self.subs = subs
+        self.len = len(self.subs)
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, idx):
+        dset = self.subs[idx]
+        if self.transform:
+            dset = self.transform(dset)
+        return dset
+
 
 class MetaDataset(Dataset):
     def __init__(self, raws, events, transform=None, offset = 0., **kwargs) -> None:
@@ -201,7 +341,7 @@ class TrialDataset(Dataset):
                 query.append({'x': x[ii], 'y': y[ii], 'word_label': word_labels[ii]})
 
             if query:
-                batches.append({'supp': supp, 'query': query})
+                batches.append((supp, query))
 
         return batches
 

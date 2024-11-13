@@ -1,3 +1,5 @@
+import torch.nn.functional as F
+from collections import defaultdict
 from torch import optim
 from copy import deepcopy
 from torch.nn.modules import Module
@@ -70,6 +72,7 @@ def log_results(top_k_accs, top_k_accs_random, save_dir='evals', ks: list = [1, 
 
 def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_encoder_on_support=False, inner_optim=None, loss_type='ce_loss', model_type="normal", **kwargs):
     correct_ks = np.zeros(len(ks))
+    all_preds = defaultdict(int)
     total = 0
     if unfreeze_encoder_on_support:
         model.unfreeze()
@@ -107,9 +110,11 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
                     correct = top_k_indices.eq(batch['w_lbs'].view(-1, 1).expand_as(top_k_indices))
                     correct_ks[j] += sum(correct.sum(dim=-1)).item()
                 total += logits.shape[0]
-            
+                preds = torch.argmax(logits, dim=1)
+                for pred in preds:
+                    all_preds[pred.item()] += 1
             model.load_state_dict(old)
-
+    print(torch.topk(F.softmax(torch.tensor(list(all_preds.values())).to(torch.float32)), 1))
     return correct_ks / total
 
 
@@ -132,6 +137,9 @@ def load_model(model_dir, word_index, type='classifier_head', inner_lr=0.001, **
         model = EEG_Encoder_Classification_Head(eeg_encoder=clip_model.eeg_encoder, num_classes=len(word_index) // 2, eeg_projection=clip_model.eeg_projection)
     elif type == 'classifier_combined':
         model = model_cls.from_config(type='base', num_classes=len(word_index) // 2, use_classifier=True)
+    # elif type == 'clip':
+    #     model = model_cls.from_config(type='base', use_classifier=False)
+    #     load_
 
     if loaded['is_meta_train']:
         inner_optim = optim.SGD(model.parameters(), inner_lr)
@@ -369,8 +377,9 @@ def test_model():
 
 if __name__ == '__main__':
     configure_logging()
-    model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v26/best_checkpoint_0_142.pth'
+    # model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v26/best_checkpoint_0_142.pth'
     # model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v1/best_checkpoint_3_142.pth'
+    model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v3/best_checkpoint_0_33.pth'
 
     ks = [1, 5, 15, 50, 500, 1500]
     # test(model_dir, seed=42, ks=ks)

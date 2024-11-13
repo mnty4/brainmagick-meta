@@ -14,8 +14,8 @@ import numpy as np
 import logging
 import typing as tp
 import hydra
-from .train import override_args_
-from .meta_dataset import get_dataset, get_dataloaders
+# from .train import override_args_
+# from .meta_dataset import get_dataset, get_dataloaders
 from copy import deepcopy
 from tqdm import trange
 from torch.utils.tensorboard import SummaryWriter
@@ -300,7 +300,29 @@ def main(args: tp.Any) -> float:
     if '_BM_TEST_PATH' in os.environ:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
-def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, loss_type='combined_loss', **kwargs):
+def train_clip(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, loss_type='combined_loss', **kwargs):
+    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+    train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+    val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+    model_cls = registry.get_model_class("Clip-Audio-Emformer")    
+    model = model_cls.from_config(type='base')
+
+    ks = [1, 5, 15, 50, 500, 1500]
+    del model
+    del model_cls
+    del train_loader
+    del val_loader
+    del word_index
+    del inner_optim
+    
+    test(best_model_path, seed=42, ks=ks, type='clip', loss_type=loss_type, **test_kwargs)
+
+
+def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
     train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
     val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 
@@ -341,7 +363,7 @@ def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=Fals
 
 
 
-def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, do_meta_train_for_head=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, **kwargs):
+def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, do_meta_train_for_head=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, **kwargs):
     train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
     val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 

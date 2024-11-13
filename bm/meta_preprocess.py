@@ -161,7 +161,7 @@ def preprocess_raws(raws, random_noise=False, **kwargs):
         raw._data = data
         
 
-def preprocess_words(save_dir='preprocessed', **kwargs):
+def preprocess_words(save_dir='preprocessed', by_sub=False, **kwargs):
     save_path = os.path.join(base, save_dir)
     os.makedirs(save_path, exist_ok=True)
 
@@ -175,15 +175,23 @@ def preprocess_words(save_dir='preprocessed', **kwargs):
         with open(word_index_path, "rb") as f:
             word_index = torch.load(f, weights_only=True)
 
-    subs, word_index, additional_info = preprocess_recordings(raws, events, infos, word_index, **kwargs)
+    subs, trials, word_index, additional_info = preprocess_recordings(raws, events, infos, word_index, **kwargs)
     logger.info(f'Saving tensors to "{save_path}"...')
-    for sub in subs:
-        torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
+    if by_sub:
+        for sub in subs:
+            torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
+    else:
+        session = defaultdict(int)
+        for trial in trials:
+            curr_session = session[f'{trial["sub_id"]}_{trial["story_uid"]}']
+            torch.save(trial, os.path.join(save_path, f'{trial["sub_id"]}_{curr_session}_{int(trial["story_uid"])}.pt'))
+            session[f'{trial["sub_id"]}_{trial["story_uid"]}'] += 1
 
     with open(word_index_path, "wb") as f:
         torch.save(word_index, f)
     logger.info(f'Save successful.')
-    return subs, word_index, additional_info
+    
+    return subs, trials, word_index, additional_info
 
 def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     subs_list = subs.values()
@@ -202,6 +210,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
 
     generate_embeddings = SpeechEmbeddings()
     subs = defaultdict(list)
+    trials = []
     word_index = word_index or {}
     word_count = 0.
     logger.info('Preprocessing recordings...')
@@ -282,11 +291,12 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             'w_lbs': w_lbs,
         }
         subs[sub_id].append(trial)
+        trials.append(trial)
         logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
     word_index.update({i: w for w, i in word_index.items()})
     logger.info('Recordings preprocessed successfully.')
     
-    return subs, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
+    return subs, trials, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
 
 def preprocess_words_test(**kwargs):
     subs, word_index, additional_info = preprocess_words(save_dir='preprocessed', **kwargs)

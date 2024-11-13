@@ -1,3 +1,4 @@
+from collections import defaultdict
 from torch.utils.data import Dataset
 import numpy as np
 import torch
@@ -6,6 +7,101 @@ import glob
 from typing import Tuple, List
 import regex as re
 base = os.path.dirname(os.path.abspath(__file__))
+
+def load_preprocessed_trials(is_train=True, preprocessed_dir='preprocessed', strategy='session', **kwargs) -> Tuple[dict, dict]:
+    save_path = os.path.join(base, preprocessed_dir)
+    tensor_paths = sorted(glob.glob(os.path.join(save_path, '*.pt')))
+    # trial_paths = []
+    subs = defaultdict(lambda: ({}, {}))
+    word_index = {}
+    for path in tensor_paths:
+        name = os.path.basename(path)
+        if re.match('sub-\d+_\d+_\d+\.pt', name):
+            sub, sess, story = name.split('_')
+            subs[sub][int(sess)][story] = path
+            # trial_paths.append(path)
+        if name == 'word_index.pt':
+            word_index = torch.load(path, weights_only=True)
+    
+    if strategy == 'session':
+        sessions = flatten_subs(subs)
+
+
+    # elif strategy == 'sub':
+
+
+def split_by_sub(subs, is_train=True):
+    sub_count = len(subs)
+
+    train_subs = {}
+    val_subs = {}
+    test_subs = {}    
+
+    train_ids, val_ids, test_ids = split_subs(sub_count)
+
+    for sub in subs:
+        for session in range(2):
+            for trial_path in subs[sub][session]:
+                name = os.path.basename(path)
+                train_subs[name] = torch.load(path, weights_only=True)
+    
+    if is_train:
+        for idx in train_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            train_subs[name] = torch.load(path, weights_only=True)
+        
+        for idx in val_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            val_subs[name] = torch.load(path, weights_only=True)
+    else:
+        for idx in test_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            test_subs[name] = torch.load(path, weights_only=False)
+
+    # reuse the same sub if only 1 sub (this is only for development)
+    if sub_count == 1:
+        
+        sub_path = sub_paths[0]
+        name = os.path.basename(sub_path)
+        sub = torch.load(sub_path, weights_only=True)
+        train_subs[name], val_subs[name], test_subs[name] = sub, sub, sub
+    
+    # use 1 sub for train and reuse a separate sub for val and test (this is only for development)
+    if sub_count == 2:
+        train_path = sub_paths[0]
+        val_test_path = sub_paths[1]
+        train_name = os.path.basename(train_path)
+        val_test_name = os.path.basename(val_test_path)
+        train_subs[train_name] = torch.load(train_path, weights_only=True)
+        val_subs[val_test_name] = torch.load(val_test_path, weights_only=True)
+        test_subs[val_test_name] = val_subs[val_test_name]
+    
+    if sub_count < 3:
+        return train_subs, val_subs, test_subs
+
+    train_ids, val_ids, test_ids = split_subs(sub_count)
+
+    if is_train:
+        for idx in train_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            train_subs[name] = torch.load(path, weights_only=True)
+        
+        for idx in val_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            val_subs[name] = torch.load(path, weights_only=True)
+    else:
+        for idx in test_ids:
+            path = sub_paths[idx]
+            name = os.path.basename(path)
+            test_subs[name] = torch.load(path, weights_only=False)
+
+    return (train_subs, val_subs, test_subs)
+
 
 def load_preprocessed(is_train=True, preprocessed_dir='preprocessed', **kwargs) -> Tuple[dict, dict]:
     save_path = os.path.join(base, preprocessed_dir)
