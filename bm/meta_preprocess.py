@@ -214,6 +214,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         event: pd.DataFrame
         
         word_events: pd.DataFrame = event[event['kind'] == 'word']
+        word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
         # raw.annotations.to_data_frame().info()
         # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
         # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
@@ -257,7 +258,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
 
             audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
                                                                        audio_embedding_length=audio_embedding_length)
-
             if word_label in word_index:
                 word_id = word_index[word_label]
             else:
@@ -273,7 +273,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         x = torch.tensor(np.array(x)).to(torch.float32)
         y = torch.stack(y).to(torch.float32)
         w_lbs = torch.tensor(w_lbs).to(torch.int64)
-
         trial = {
             'story_uid': story_id,
             'sub_id': sub_id,
@@ -285,7 +284,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
     word_index.update({i: w for w, i in word_index.items()})
     logger.info('Recordings preprocessed successfully.')
-    
+    logger.debug(f'size of word index: {len(word_index)}')
     return subs, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
 
 def preprocess_words_test(**kwargs):
