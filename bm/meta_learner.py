@@ -119,13 +119,20 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
 
     model = model.to(DEVICE)
     best_model = None
+    best_model = deepcopy(model.state_dict())
+    val_loss= 0
+                    
     best_val_loss, best_train_loss = float('inf'), float('inf')
     best_epoch, best_i = 0, 0
     for meta_epoch in range(n_meta_epochs):
+        # print('Meta epoch: ', meta_epoch, 'Meta batch: ', i,'stop for debugging')
+        create_checkpoint(0, 0, model, meta_optim, inner_optim, val_loss, checkpoint_dir) 
+        break
+    
         for i, meta_batch in enumerate(train_loader):
             train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim, do_meta_train=do_meta_train, **kwargs)
             writer.add_scalar('Train loss', train_loss, meta_epoch*len(train_loader) + i)
-
+            
             if i % eval_interval == 0 or i == len(train_loader) - 1:
                 val_loss = evaluate(model, val_loader, inner_optim, **kwargs)
                 writer.add_scalar('Val loss', val_loss, meta_epoch*len(train_loader) + i)
@@ -137,13 +144,12 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
                     best_model = deepcopy(model.state_dict())
                     best_epoch = meta_epoch
                     best_i = i
-            # print('Meta epoch: ', meta_epoch, 'Meta batch: ', i,'stop for debugging')
-            # break
+            
 
         if meta_epoch - best_epoch >= early_stop_patience:
             logger.info('Early stopping triggered...')
             break
-    
+        
     logger.info(f'[Best model] Meta epoch: {best_epoch}, meta batch: {best_i}. Train loss = {best_train_loss}, Val loss = {best_val_loss}')
     writer.close()
 
@@ -345,8 +351,6 @@ def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=Fals
     del inner_optim
     
     test(best_model_path, seed=42, ks=ks, type='classifier_combined', loss_type=loss_type, **test_kwargs)
-
-
 
 def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, do_meta_train_for_head=False, n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001, **kwargs):
     train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}

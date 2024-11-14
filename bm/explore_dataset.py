@@ -18,6 +18,21 @@ from hydra import initialize, compose
 import hydra
 from speech_embeddings import SpeechEmbeddings
 from bm.setup_logging import configure_logging
+
+
+# Redirect print statements to a file
+# sys.stdout = open('output_explore_dataset.log', 'w')
+# Configure logging to write to the same file
+# logging.basicConfig(filename='output_explore_dataset.log', 
+#                     level=logging.INFO, 
+#                     format='%(asctime)s - %(levelname)s - %(message)s')
+# # Example usage
+# print("This is a print statement.")
+# logging.info("This is an info log message.")
+# logging.warning("This is a warning log message.")
+
+
+
 """
 # from bm import env
 bm.env Env(cache=None,feature_models=None,studies={'gwilliams2022': PosixPath('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/gwilliams2022_newdl'), 'schoffelen2019': PosixPath('/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/data/schoffelen2019')})
@@ -46,6 +61,7 @@ logger = logging.getLogger(__name__)
 
 def get_dataset(**kwargs):
     raws, events, info = get_raw_events(**kwargs)
+    exit(0)
     # train, val, test = split_subjects(raws, events)
     dataset = MetaDataset(raws, events, offset=0.)
     return dataset
@@ -307,8 +323,6 @@ def preprocess_Gwilliams2022():
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
 
-
-
 def run_preprocess_gwilliams_2(args):
     kwargs: tp.Dict[str, tp.Any]
     kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
@@ -348,12 +362,16 @@ def explore_schoffelen():
         cfg = compose(config_name="config_schoffelen.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
         # print(OmegaConf.to_yaml(cfg))    
     dset = main(cfg)
-    for i in range(10):
-        print(dset[i])
-        break
+    # for i in range(10):
+    #     print(dset[i])
+    #     break
     
 if __name__ == "__main__":
     # explore_Gwilliams2022()
     # preprocess_Gwilliams2022()
-    preprocess_Gwilliams2022_2()
-    # explore_schoffelen()
+    # preprocess_Gwilliams2022_2()
+    explore_schoffelen()
+
+
+    # Close the file at the end
+    # sys.stdout.close()

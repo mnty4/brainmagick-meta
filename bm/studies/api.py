@@ -276,12 +276,9 @@ class Recording:
             else:                
                 cache_file = self._cache_folder / "events.csv"
                 if cache_file.exists():
-                    print('event file already exists')
+                    # print('event file already exists')
                     # just read the csv file using pandas.
                     self._events = self._read_from_cache(cache_file)
-                    # print('events loaded')
-                    # print(self._events)
-                    # exit(0)
                 else:
                     print('event file does not exist, loading events')
                     self._events = self._load_events()
@@ -401,6 +398,7 @@ def preprocess_mne(
 
     info_kwargs = dict(raw.info)
     info_kwargs['sfreq'] = sample_rate
+    # info_kwargs['verbose'] = False
     info = mne.Info(**info_kwargs)
     # check that layout works
     layout = mne.find_layout(info)  # noqa

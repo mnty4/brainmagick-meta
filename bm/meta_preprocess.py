@@ -39,7 +39,6 @@ import threading
 # sys.path.append(os.path.dirname(SCRIPT_DIR))
 
 logger = logging.getLogger(__name__)
-
 base = "/projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm/" #= os.path.abspath
 
 def list_to_tuple(function: tp.Callable) -> tp.Any:
@@ -67,7 +66,6 @@ def deep_freeze(thing):
         raise TypeError(f"unfreezable type: '{type(thing)}'")
     else:
         return thing
-
 
 def deep_freeze_args(func):
     import functools
@@ -163,9 +161,8 @@ def get_raw_events(selections: tp.List[tp.Dict[str, tp.Any]],
     infos = [recording.mne_info for recording in all_recordings]
     print('len(raws)',len(raws),'len(events)',len(events),'len(infos)',len(infos))
     
-    logger.info(f'Recordings loaded succesfully.')
+    print(f'Recordings loaded succesfully.')
     return raws, events, infos
-
 
 def preprocess_words(save_dir='preprocessed', **kwargs):
     save_path = os.path.join(base, save_dir)
@@ -201,8 +198,6 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     
     # return train, valid, test
     
-
-
 def _extract(raw, event, info, offset = 0., n_fft = 60, **kwargs):
     thread_id = threading.get_ident()
     word_index = {}
@@ -373,7 +368,6 @@ def preprocess_words_test(**kwargs):
         assert len(subs[sub]) == len(saved)
     saved = torch.load(os.path.join(save_path, f'word_index.pt'), weights_only=True)
     assert len(word_index) == len(saved)
-
 
 def run(args):
     kwargs: tp.Dict[str, tp.Any]

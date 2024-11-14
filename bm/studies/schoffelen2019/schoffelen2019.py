@@ -97,13 +97,14 @@ class Schoffelen2019Recording(api.Recording):
         events_filter: str
             ???
         modality: str
-            either "visual", "audio" or "all"
+            either "visual", "audio :" or "all"
 
         Note
         ----
         recordings are ordered by uid
         """
-        _prepare()
+        print('!!!!!!!!!!!!!!! Skipping Download of Schoffelen2019 data')
+        # _prepare()
         # The following subjects have 2 separate MEG runs, which would require
         # specific code to handle.
         # 1115 has nans in unexpected places.

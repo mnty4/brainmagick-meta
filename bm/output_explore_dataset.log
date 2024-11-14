@@ -1,0 +1,12 @@
+This is a print statement.
+SCRIPT_DIR /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm
+explore_dataset.py import ok
+hello there good sir.
+running run
+[meta_preprocess.get_raw_events] selections (frozendict.frozendict({'study': 'schoffelen2019', 'modality': 'audio', 'events_filter': None}),)
+[_extract_recordings]: selections (frozendict.frozendict({'study': 'schoffelen2019', 'modality': 'audio', 'events_filter': None}),)
+!!!!!!!!!!!!!!! Skipping Download of Schoffelen2019 data
+ 15:16:29,868 - INFO - For logs, checkpoints and samples, check /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm.
+2024-11-13 15:16:29,868 - INFO - Caching intermediate data under /projects/SilSpeech/Dev/SilentSpeech_Se2/listen_meg_eeg_preprocess/brainmagick/bm/cache.
+2024-11-13 15:16:29,870 - INFO - Loading recordings...
+2024-11-13 15:16:30,012 - WARNING - Requested 1000 recordings but only found 96
