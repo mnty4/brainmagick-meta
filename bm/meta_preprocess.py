@@ -249,7 +249,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             #     # continue
             
             spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
+                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4, n_jobs=2)
             # spectrums.plot(picks="data", exclude="bads", amplitude=False)
         #     spectrums.plot_topomap(bands = {'Delta (0-4 Hz)': (0, 4), 'Theta (4-8 Hz)': (4, 8),
         #  'Alpha (8-12 Hz)': (8, 12), 'Beta (12-30 Hz)': (12, 30),
