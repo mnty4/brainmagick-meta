@@ -223,6 +223,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         event: pd.DataFrame
         
         word_events: pd.DataFrame = event[event['kind'] == 'word']
+        word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
         # raw.annotations.to_data_frame().info()
         # descs = [json.loads(desc.replace("'", "\"")) for desc in raw.annotations.description]
         # starts = [desc['start'] for desc in descs if desc['kind'] == 'word']
@@ -257,7 +258,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             #     # continue
             
             spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
+                                                  n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4, n_jobs=2)
             # spectrums.plot(picks="data", exclude="bads", amplitude=False)
         #     spectrums.plot_topomap(bands = {'Delta (0-4 Hz)': (0, 4), 'Theta (4-8 Hz)': (4, 8),
         #  'Alpha (8-12 Hz)': (8, 12), 'Beta (12-30 Hz)': (12, 30),
@@ -266,7 +267,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
 
             audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
                                                                        audio_embedding_length=audio_embedding_length)
-
             if word_label in word_index:
                 word_id = word_index[word_label]
             else:
@@ -282,7 +282,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         x = torch.tensor(np.array(x)).to(torch.float32)
         y = torch.stack(y).to(torch.float32)
         w_lbs = torch.tensor(w_lbs).to(torch.int64)
-
         trial = {
             'story_uid': story_id,
             'sub_id': sub_id,
@@ -295,7 +294,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
         logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
     word_index.update({i: w for w, i in word_index.items()})
     logger.info('Recordings preprocessed successfully.')
-    
+    logger.debug(f'size of word index: {len(word_index)}')
     return subs, trials, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
 
 def preprocess_words_test(**kwargs):
