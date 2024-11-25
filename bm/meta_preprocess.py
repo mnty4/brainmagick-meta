@@ -213,7 +213,7 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
 
 def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs):
     if not generate_embeddings:
-        generate_embeddings = SpeechEmbeddings(device='cuda', model="facebook/wav2vec2-large-xlsr-53")
+        generate_embeddings = SpeechEmbeddings(device='cuda')
     
     word_events: pd.DataFrame = event[event['kind'] == 'word']
     word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
