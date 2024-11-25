@@ -1,3 +1,7 @@
+from bm.losses import ClipLoss
+from hydra import initialize, compose
+from .train import override_args_
+from bm.models import SimpleConv
 from lavis import registry
 # import lavis.models.belt3_models.belt_clip_mae import Clip_TemporalConformer2D
 import lavis.models.belt3_models.belt_clip_mae
@@ -36,7 +40,47 @@ torch.manual_seed(seed)
 np.random.seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_lr=0.1, loss_type='clip_loss'):
+class Batch:
+    def __init__(self, subject_index, recording_index, study_name, features):
+        self._subject_index = subject_index
+        self._recording_index = recording_index
+        self._study_name = study_name
+        self._features = features
+    @property
+    def features(self) -> int:
+        if self._features is None:
+            raise RuntimeError("Recording.features has not been initialized")
+        return self._features
+    @property
+    def subject_index(self) -> int:
+        if self._subject_index is None:
+            raise RuntimeError("Recording.subject_index has not been initialized")
+        return self._subject_index
+
+    @property
+    def recording_index(self) -> int:
+        if self._recording_index is None:
+            raise RuntimeError("Recording.recording_index has not been initialized")
+        return self._recording_index
+    
+    @classmethod
+    def study_name(self) -> str:
+        return self._study_name
+    
+def parse_to_input_batch_format(input_batch: dict) -> tp.Tuple[dict, dict]:
+    batch = Batch(
+                subject_index=torch.tensor([int(input_batch['sub_id'].split('-')[1])] * input_batch['eeg'].shape[0]).to(DEVICE), 
+                recording_index=[int(input_batch['story_uid'])] * input_batch['eeg'].shape[0],
+                study_name='gwilliams2022',
+                features=input_batch['audio'])
+    
+    input = dict(meg=input_batch['eeg'])
+
+    mask = torch.ones((input_batch['eeg'].shape[0], 1, input_batch['eeg'].shape[-1])).to(torch.bool)
+    
+    return input, batch, mask
+
+def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, inner_lr=0.1, loss_type='clip_loss', loss_module=None, **kwargs):
     """
         query: number of batches to process as query
 
@@ -67,10 +111,18 @@ def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_
         batches[i]['eeg'] = batches[i]['eeg'].to(DEVICE)
         batches[i]['audio'] = batches[i]['audio'].to(DEVICE)
         batches[i]['w_lbs'] = batches[i]['w_lbs'].to(DEVICE)
-        output = model.generate(batches[i])
-
+        if callable(getattr(model, "generate", None)):
+            output = model.generate(batches[i])
+            loss: torch.Tensor = output[loss_type]
+        else:
+            input, batch, mask = parse_to_input_batch_format(batches[i])
+            output = model(input, batch)
+            if loss_module is not None:
+                loss = loss_module(output, batch.features, mask)
+            else:
+                raise ValueError('missing loss_module')
+        
         inner_optim.zero_grad()
-        loss: torch.Tensor = output[loss_type]
         loss.backward()
         inner_optim.step()
 
@@ -93,7 +145,7 @@ def train_inner_loop(model: Module, batches, inner_optim=None, n_query=0, inner_
 
     return new_weights, supp_losses, query_losses
 
-def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=None, inner_optim=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, do_meta_train=True, early_stop_patience=5, delta = 0.05, train_type='clip', **kwargs):
+def meta_train(model: Module, train_loader, val_loader, word_index, args, meta_optim=None, inner_optim=None, model_name=None, save_dir=None, n_meta_epochs = 1, eval_interval=100, do_meta_train=True, early_stop_patience=5, delta = 0.05, train_type='clip', **kwargs):
     """
         Train the ClipMAE-Spatial-Emformer which takes:
 
@@ -110,7 +162,7 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
 
     """
 
-    writer, checkpoint_dir = setup_logging(save_dir, do_meta_train=do_meta_train, train_type=train_type, **kwargs)
+    writer, checkpoint_dir = setup_logging(save_dir, do_meta_train=do_meta_train, train_type=train_type, model_name=model_name, **kwargs)
 
     model = model.to(DEVICE)
     best_model = None
@@ -118,11 +170,11 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
     best_epoch, best_i = None, None
     for meta_epoch in range(n_meta_epochs):
         for i, meta_batch in enumerate(train_loader):
-            train_loss = process_meta_batch(model, meta_batch, meta_optim, inner_optim, do_meta_train=do_meta_train, **kwargs)
+            train_loss = process_meta_batch(model, meta_batch, args, meta_optim, inner_optim, do_meta_train=do_meta_train, **kwargs)
             writer.add_scalar('Train loss', train_loss, meta_epoch*len(train_loader) + i)
 
             if i % eval_interval == 0 or i == len(train_loader) - 1:
-                val_loss = evaluate(model, val_loader, inner_optim, **kwargs)
+                val_loss = evaluate(model, val_loader, args, inner_optim, **kwargs)
                 writer.add_scalar('Val loss', val_loss, meta_epoch*len(train_loader) + i)
                 logger.info(f'Meta epoch: {meta_epoch}, meta batch: {i}. Train loss = {train_loss}, Val loss = {val_loss}')
                 create_checkpoint(meta_epoch, i, model, meta_optim, inner_optim, val_loss, checkpoint_dir)  
@@ -147,18 +199,20 @@ def meta_train(model: Module, train_loader, val_loader, word_index, meta_optim=N
     model.load_state_dict(best_model)
     return best_path
 
-def setup_logging(save_dir, do_meta_train=True, train_type='clip', do_meta_train_for_head=False, **kwargs):
+def setup_logging(save_dir, do_meta_train=True, train_type='clip', do_meta_train_for_head=False, model_name=None, **kwargs):
     runs_dir = os.path.join(base, save_dir or 'runs')
     version = 1
-    file_name = f"{'non_meta_' if not do_meta_train else 'meta_'}"
+    file_name = f"{'non_meta' if not do_meta_train else 'meta'}"
     if train_type == 'classifier':
         file_name = 'm_head_' if do_meta_train_for_head else 'nm_head_' + 'classifier_' + file_name
 
-    checkpoint_dir = os.path.join(runs_dir, f"{file_name}v{version}")
+    if model_name is not None:
+        file_name = model_name
+    checkpoint_dir = os.path.join(runs_dir, f"{file_name}_v{version}")
 
     while os.path.exists(checkpoint_dir):
         version += 1
-        checkpoint_dir = os.path.join(runs_dir, f"{file_name}v{version}")
+        checkpoint_dir = os.path.join(runs_dir, f"{file_name}_v{version}")
     
     os.makedirs(checkpoint_dir)
     return SummaryWriter(checkpoint_dir), checkpoint_dir
@@ -174,23 +228,23 @@ def create_checkpoint(meta_epoch, i, model, meta_optim, inner_optim, loss, check
             'loss': loss,
             }, os.path.join(checkpoint_dir, f'checkpoint_{meta_epoch}_{i}.pth'))
 
-def evaluate(model, val_loader, inner_optim=None, **kwargs):
+def evaluate(model, val_loader, args, inner_optim=None, **kwargs):
     
     query_losses_all = []
 
     for meta_batch in val_loader:
         for i in range(len(meta_batch)):
-            _, _, query_losses = train_inner_loop(model, meta_batch[i], inner_optim, n_query=1, **kwargs)
+            _, _, query_losses = train_inner_loop(model, meta_batch[i], args, inner_optim, n_query=1, **kwargs)
             query_losses_all.extend(query_losses)
 
     return sum(query_losses_all) / len(query_losses_all)
 
-def process_meta_batch(model: Module, meta_batch: dict, meta_optim=None, inner_optim=None, do_meta_train=True, meta_lr=0.01, **kwargs):
+def process_meta_batch(model: Module, meta_batch: dict, args, meta_optim=None, inner_optim=None, do_meta_train=True, meta_lr=0.01, **kwargs):
     weights_before = deepcopy(model.state_dict())
     new_state_dicts = []
     losses = []
     for i in range(len(meta_batch)):
-        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch[i], inner_optim, **kwargs)
+        new_state_dict, supp_losses, _ = train_inner_loop(model, meta_batch[i], args, inner_optim, **kwargs)
         if not do_meta_train:
             model.load_state_dict(new_state_dict)
         else:
@@ -321,6 +375,57 @@ def train_clip(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_met
     
     test(best_model_path, seed=42, ks=ks, type='clip', loss_type=loss_type, **test_kwargs)
 
+def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss'):
+    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+    train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+    val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
+
+    
+    model = SimpleConv(in_channels=dict(meg=208), out_channels=1024,
+                           n_subjects=5, **args.simpleconv)
+    optargs = args.optim
+    params = list(model.parameters())
+    if optargs.name == "adam":
+        optimizer = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+    else:
+        raise ValueError(f'Invalid optimizer {args.optim}')
+
+    if do_meta_train:
+        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
+        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+    else:
+        meta_optim = None
+        inner_optim = optimizer
+    kw = dict(args.clip)
+    kw.pop('save_best', None)
+    kw.pop('sync_grad', None)
+    loss_module = ClipLoss(**kw, dset_args=args.dset)
+
+    best_model_path = meta_train(model, 
+                      train_loader=train_loader, 
+                      val_loader=val_loader, 
+                      word_index=word_index, 
+                      args=args,
+                      meta_optim=meta_optim, 
+                      inner_optim=inner_optim,
+                      n_meta_epochs=n_meta_epochs,
+                      do_meta_train=do_meta_train,
+                      model_name=model_name,
+                      loss_type=loss_type,
+                      loss_module=loss_module)
+    
+    del model
+    del train_loader
+    del val_loader
+    del word_index
+    del inner_optim
+    ks = [1, 5, 15, 50, 500, 1500]
+    test(best_model_path, seed=42, ks=ks, type='simple_conv', loss_type=loss_type, **test_kwargs)
+    
 
 def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
     train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
@@ -479,7 +584,7 @@ def test_meta_train():
 
     meta_train(model, train_dloader, val_dloader, word_index, meta_optim, inner_optim, n_meta_epochs=20)
 
-def run_tests():
+def run_tests(args):
     # n_meta_epochs=20, inner_lr=0.001, meta_lr=0.001,
 
     # train_kwargs = {
@@ -508,36 +613,40 @@ def run_tests():
     # test_kwargs['model_name'] = 'meta_clf_mhead_2_1_128_shot_0_128'
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
 
-    train_kwargs = {
-        'mini_batches_per_trial': 4, 
-        'samples_per_mini_batch': 64, 
-        'batch_size': 4,
-    }
-    val_kwargs = {
-        'mini_batches_per_trial': 5, 
-        'samples_per_mini_batch': 8, 
-        'batch_size': 4,
-    }
-    test_kwargs = {
-        'mini_batches_per_trial': 8, 
-        'samples_per_mini_batch': 8, 
-        'batch_size': 1,
-        'unfreeze_encoder_on_support': False,
-        'n_shot': 4,
-    }
-    kwargs = {
-        'n_meta_epochs': 5
-    }
-    test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
-    train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
-    test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
-    test_kwargs['model_name'] = 'meta_combined_clf_4_4_8_shot_4_8'
-    train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
-    test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
-    test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8'
-    train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True, **kwargs)
+    # train_kwargs = {
+    #     'mini_batches_per_trial': 4, 
+    #     'samples_per_mini_batch': 64, 
+    #     'batch_size': 4,
+    # }
+    # val_kwargs = {
+    #     'mini_batches_per_trial': 5, 
+    #     'samples_per_mini_batch': 8, 
+    #     'batch_size': 4,
+    # }
+    # test_kwargs = {
+    #     'mini_batches_per_trial': 8, 
+    #     'samples_per_mini_batch': 8, 
+    #     'batch_size': 1,
+    #     'unfreeze_encoder_on_support': False,
+    #     'n_shot': 4,
+    # }
+    meta_train_args = args.meta_train
+    # print(args.meta_train.train.do_meta_train)
+    n_shot = meta_train_args.test.n_shot * meta_train_args.test.samples_per_mini_batch
+    n_way = meta_train_args.test.mini_batches_per_trial * meta_train_args.test.samples_per_mini_batch - n_shot
+    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
+    train_simple_conv(meta_train_args.train, meta_train_args.val, meta_train_args.test, args, model_name=model_name, n_meta_epochs=5)
+
+    # test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
+    # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
+    # test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
+    # test_kwargs['model_name'] = 'meta_combined_clf_4_4_8_shot_4_8'
+    # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    # test_kwargs['model_name'] = 'meta_clf_nmhead_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, **kwargs)
+    # test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8'
+    # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True, **kwargs)
 
     # test_kwargs['unfreeze_encoder_on_support'] = True
 
@@ -546,11 +655,54 @@ def run_tests():
     # test_kwargs['model_name'] = 'meta_clf_mhead_4_4_8_shot_4_8_unfreeze'
     # train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=True, do_meta_train_for_head=True)
 
-if __name__ == '__main__':
-    # main()
+
+def run(args):
+    kwargs: tp.Dict[str, tp.Any]
+    kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
+    selections = [args.selections[x] for x in args.dset.selections]
+    kwargs["selections"] = selections
+    if args.optim.loss == "clip":
+        kwargs['extra_test_features'].append("WordHash")
+
+    # return get_raw_events(**kwargs, num_workers=args.num_workers)
+    # return preprocess_words_test(**kwargs, num_workers=args.num_workers)
+
+    kwargs['offset'] = 0.15
+
+    return run_tests(args)
+
+# @hydra_main(config_name="config", config_path="conf", version_base="1.1")
+def main(args: tp.Any) -> float:
+    print('hello there good sir.')
+    override_args_(args)
+
+    global __file__  # pylint: disable=global-statement,redefined-builtin
+    # Fix bug when using multiprocessing with Hydra
+    __file__ = hydra.utils.to_absolute_path(__file__)
+
+    from . import env  # we need this here otherwise submitit pickle does crazy stuff.
+    # Updating paths in config that should stay relative to the original working dir
+    with env.temporary_from_args(args):
+        torch.set_num_threads(1)
+        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+        logger.info(f"Caching intermediate data under {args.cache}.")
+        logger.debug(args)
+        return run(args)
+
+
+    if '_BM_TEST_PATH' in os.environ:
+        main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
+
+if __name__ == "__main__":
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+        # simple_conv_cfg = compose(config_name="model/clip_conv.yaml")
+        # cfg['simpleconv'] = simple_conv_cfg
     configure_logging()
-    run_tests()
-    # test_meta_train()
-    # test_meta_train_e2e()
-    # test_normal_train_e2e()
-    # test_normal_train_combined_clf()
+    # torch.multiprocessing.set_start_method('spawn', force=True)
+    main(cfg)
+
+if __name__ == '__main__':
+    configure_logging()
+    main()
+    # run_tests()
