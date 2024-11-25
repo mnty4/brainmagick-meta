@@ -22,10 +22,7 @@ resources
 draft_notebooks/
 submitit_*/
 bm/runs/*
-bm/preprocessed/*
-bm/preprocessed_1/*
-bm/preprocessed_2/*
-bm/preprocessed_random/*
 bm/evals/*
 bm/outputs/*
 notebook_templates/outputs/*
+bm/preprocessed*

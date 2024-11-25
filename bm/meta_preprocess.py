@@ -1,3 +1,8 @@
+from timeit import default_timer as timer
+from functools import partial
+# from multiprocessing import Pool
+import torch
+from torch.multiprocessing import Pool
 import torch.nn.functional as F
 import pickle
 import json
@@ -14,10 +19,10 @@ from omegaconf import OmegaConf
 from dora import hydra_main
 import logging
 import typing as tp
-import torch
+
 from hydra import initialize, compose
 import hydra
-from typing import Tuple
+from typing import Tuple, List
 import os
 from functools import lru_cache
 import functools
@@ -159,39 +164,40 @@ def preprocess_raws(raws, random_noise=False, **kwargs):
             data = normalise(data)
 
         raw._data = data
-        
 
-def preprocess_words(save_dir='preprocessed', by_sub=False, **kwargs):
+def preprocess_raw(raw, random_noise=False, **kwargs):
+    data = raw.get_data()
+    if random_noise:
+        data = apply_noise(data)
+    else:
+        data = apply_baseline(raw, data)
+        data = apply_clamp(data)
+        data = normalise(data)
+
+    raw._data = data
+
+def preprocess_words(save_dir='preprocessed', by_sub=False, num_workers=2, **kwargs):
     save_path = os.path.join(base, save_dir)
     os.makedirs(save_path, exist_ok=True)
 
     raws, events, infos = get_raw_events(**kwargs)
+    start = timer()
+    # with Pool(num_workers) as p:
+    #     p.map(partial(preprocess_raw, **kwargs), raws)
 
     preprocess_raws(raws, **kwargs)
-    
-    word_index = {}
-    word_index_path = os.path.join(save_path, f'word_index.pt')
-    if os.path.exists(word_index_path):
-        with open(word_index_path, "rb") as f:
-            word_index = torch.load(f, weights_only=True)
+    end = timer()
+    print(f"time taken to preprocess raws: {end - start}")
 
-    subs, trials, word_index, additional_info = preprocess_recordings(raws, events, infos, word_index, **kwargs)
+    start = timer()
     logger.info(f'Saving tensors to "{save_path}"...')
-    if by_sub:
-        for sub in subs:
-            torch.save(subs[sub], os.path.join(save_path, f'{sub}.pt'))
-    else:
-        session = defaultdict(int)
-        for trial in trials:
-            curr_session = session[f'{trial["sub_id"]}_{trial["story_uid"]}']
-            torch.save(trial, os.path.join(save_path, f'{trial["sub_id"]}_{curr_session}_{int(trial["story_uid"])}.pt'))
-            session[f'{trial["sub_id"]}_{trial["story_uid"]}'] += 1
+    preprocess_recordings_parallel_two_step(raws, events, infos, save_path, num_workers=3, **kwargs)
+    end = timer()
+    print(f"time taken to preprocess recordings: {end - start}")
 
-    with open(word_index_path, "wb") as f:
-        torch.save(word_index, f)
     logger.info(f'Save successful.')
     
-    return subs, trials, word_index, additional_info
+    # return subs, trials, word_index, additional_info
 
 def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     subs_list = subs.values()
@@ -204,7 +210,124 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     train_subs, train_sub_ids, valid_subs, valid_sub_ids = train_test_split(tmp_subs, tmp_sub_ids, test_size=0.125, random_state=seed, shuffle=True)
     
     # return train, valid, test
+
+def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs):
+    if not generate_embeddings:
+        generate_embeddings = SpeechEmbeddings(device='cuda', model="facebook/wav2vec2-large-xlsr-53")
     
+    word_events: pd.DataFrame = event[event['kind'] == 'word']
+    word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
+
+    sub_id = info['subject_info']['his_id']
+    story_id = float(word_events.iloc[0]['story_uid'])
+
+    x = []
+    y = []
+    w_lbs = []
+    skipped = 0
+    for i, word_event in word_events.iterrows():
+    
+        raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
+
+        wav_path = wav_path.lower()
+
+        raw_start = raw_start + offset
+        raw_end = raw_start + duration
+
+        t_idxs = raw.time_as_index([raw_start, raw_end])
+        data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+
+        if data.shape[-1] <= n_fft // 4:
+            skipped += 1
+            continue
+        
+        spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
+                                                n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4, n_jobs=2)
+
+        data, freqs = spectrums.get_data(return_freqs=True)
+
+        audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
+                                                                    audio_embedding_length=audio_embedding_length)
+        if word_label in word_index:
+            word_id = word_index[word_label]
+        else:
+            word_id = word_count
+            word_index[word_label] = word_count
+            word_count += 1
+
+        x.append(data)
+        y.append(audio_embedding)
+        w_lbs.append(word_id)
+
+    x = torch.tensor(np.array(x)).to(torch.float32)
+    y = torch.stack(y).to(torch.float32)
+    w_lbs = torch.tensor(w_lbs).to(torch.int64)
+    trial = {
+        'story_uid': story_id,
+        'sub_id': sub_id,
+        'session_id': session_id,
+        'eeg': x,
+        'audio': y,
+        'w_lbs': w_lbs,
+    }
+    logger.info(f'{sub_id} - {story_id}: skipped recordings: {skipped}/{len(word_events)}')
+
+    save_recording(save_path, trial)
+    del trial
+
+def save_recording(save_path, recording):
+    torch.save(recording, os.path.join(save_path, f'{recording["sub_id"]}_{recording["session_id"]}_{int(recording["story_uid"])}.pt'))
+
+def prepare_for_preprocessing(raws: List[Raw], events: List[pd.DataFrame], infos, offset = 0., n_fft = 64, **kwargs) -> Tuple[dict, List[int]]:
+    word_index = {}
+    word_count = 0.
+    session_ids = []
+    session = defaultdict(int)
+    for raw, event, info in zip(raws, events, infos):
+        
+        word_events: pd.DataFrame = event[event['kind'] == 'word']
+        word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
+
+        sub_id = info['subject_info']['his_id']
+        story_id = float(word_events.iloc[0]['story_uid'])
+
+        for i, word_event in word_events.iterrows():
+            raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
+            raw_start = raw_start + offset
+            raw_end = raw_start + duration
+
+            t_idxs = raw.time_as_index([raw_start, raw_end])
+            data, times = raw[:, t_idxs[0]:t_idxs[1]] 
+
+            if data.shape[-1] <= n_fft // 4:
+                continue
+
+            if word_label not in word_index:
+                word_index[word_label] = word_count
+                word_count += 1
+
+    for raw, event, info in zip(raws, events, infos):
+        word_events: pd.DataFrame = event[event['kind'] == 'word']
+        word_events = word_events.dropna(subset=['word', 'start', 'audio_start', 'duration', 'sound'])
+
+        sub_id = info['subject_info']['his_id']
+        story_id = float(word_events.iloc[0]['story_uid'])
+
+        session_id = session[f'{sub_id}_{story_id}']
+        session_ids.append(session_id)
+        session[f'{sub_id}_{story_id}'] += 1
+        
+    return word_index, session_ids
+
+def preprocess_recordings_parallel_two_step(raws, events, infos, save_path, num_workers=2, **kwargs):
+
+    logger.info('Preprocessing recordings...')
+    word_index, session_ids = prepare_for_preprocessing(raws, events, infos, **kwargs)
+    logger.info(f'word_index size: {len(word_index)}')
+    torch.save(word_index, os.path.join(save_path, 'word_index.pt'))
+
+    with Pool(num_workers) as p:
+        p.starmap(partial(preprocess_recording, word_index=word_index, save_path=save_path, **kwargs), zip(raws, events, infos, session_ids))
 
 def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs) -> Tuple[dict, dict, dict]:
 
@@ -216,8 +339,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
     logger.info('Preprocessing recordings...')
     segment_lengths = []
     durations = []
-    min_audio_embedding = float('inf')
-    max_audio_embedding = 0
+
     for raw, event, info in tqdm(zip(raws, events, infos)):
         raw: Raw
         event: pd.DataFrame
@@ -252,10 +374,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
             if data.shape[-1] <= n_fft // 4:
                 skipped += 1
                 continue
-            #     # pad with zeros if too short for window
-            #     to_pad = n_fft - data.shape[-1]
-            #     data = np.pad(data, ((0, 0), (0, to_pad)), "constant")
-            #     # continue
             
             spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
                                                   n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4, n_jobs=2)
@@ -274,7 +392,6 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
                 word_index[word_label] = word_count
                 word_count += 1
 
-            # print(f'word: {word_label}, audio features: {torch.tensor(audio_label).shape}, PSD: {torch.tensor(data).shape}')
             x.append(data)
             y.append(audio_embedding)
             w_lbs.append(word_id)
@@ -298,6 +415,7 @@ def preprocess_recordings(raws, events, infos, word_index=None, offset = 0., n_f
     return subs, trials, word_index, {'durations': durations, 'segment_lengths': segment_lengths}
 
 def preprocess_words_test(**kwargs):
+    # broken currently
     subs, word_index, additional_info = preprocess_words(save_dir='preprocessed', **kwargs)
     save_path = os.path.join(base, 'preprocessed')
     for sub in subs:
@@ -350,4 +468,5 @@ if __name__ == "__main__":
     with initialize(version_base="1.1", config_path="conf"):
         cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
     configure_logging()
+    torch.multiprocessing.set_start_method('spawn', force=True)
     main(cfg)

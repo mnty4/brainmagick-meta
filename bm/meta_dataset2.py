@@ -4,104 +4,144 @@ import numpy as np
 import torch
 import os
 import glob
-from typing import Tuple, List
+from typing import Tuple, List, Literal
 import regex as re
 base = os.path.dirname(os.path.abspath(__file__))
 
-def load_preprocessed_trials(is_train=True, preprocessed_dir='preprocessed', strategy='session', **kwargs) -> Tuple[dict, dict]:
+def parse_recording_path(path: str):
+    base_name = os.path.basename(path)
+    try:
+        sub, session, story = base_name.replace('.pt', '').split('_')
+    except:
+        raise ValueError(f'Invalid preprocessed recording format, expecting "sub-{{sub_id}}_{{session_id}}_{{story_Id}}.pt" but got {base_name}')
+    return sub, session, story
+    
+def split_recordings(paths, split_strategy: Literal['sub', 'session', 'recording']='session', **kwargs) -> Tuple[List, List, List]:
+    
+    if split_strategy == 'sub':
+        train, val, test = split_by_sub(paths, **kwargs)
+    elif split_strategy == 'recording':
+        train, val, test = split_by_recording(paths, **kwargs)
+    elif split_strategy == 'session':
+        train, val, test = split_by_session(paths, **kwargs)
+    else:
+        raise ValueError('Invalid split_strategy defined.')
+    
+    return train, val, test
+
+def split_by_sub(paths: List[str], **kwargs):
+
+    subs = defaultdict(list)
+    for path in paths:
+        sub, session, story = parse_recording_path(path)
+        subs[sub].append(path)
+
+    sub_count = len(subs)
+    train_ids, val_ids, test_ids = get_train_val_test_ids(sub_count, **kwargs)
+    train, val, test = [], [], []
+    sub_names = list(subs.keys())
+    for train_id in train_ids:
+        train.extend(subs[sub_names[train_id]])
+    for val_id in val_ids:
+        val.extend(subs[sub_names[val_id]])
+    for test_id in test_ids:
+        test.extend(subs[sub_names[test_id]])
+
+    return train, val, test
+
+def split_by_recording(paths: List[str], **kwargs):
+    recordings = paths
+    recording_count = len(recordings)
+
+    train_ids, val_ids, test_ids = get_train_val_test_ids(recording_count, **kwargs)
+
+    train = [paths[i] for i in train_ids]
+    val = [paths[i] for i in val_ids]
+    test = [paths[i] for i in test_ids]
+
+    return train, val, test
+
+def split_by_session(paths: List[str], **kwargs):
+
+    subs = defaultdict(lambda: defaultdict(list))
+    for path in paths:
+        sub, session, story = parse_recording_path(path)
+        subs[sub][session].append(path)
+
+    # flatten sessions
+    sessions = []
+    for sub in subs.values():
+        for session in sub.values():
+            sessions.append(session)
+    
+    session_count = len(sessions)
+
+    train_ids, val_ids, test_ids = get_train_val_test_ids(session_count, **kwargs)
+    train, val, test = [], [], []
+
+    for train_id in train_ids:
+        train.extend(sessions[train_id])
+    for val_id in val_ids:
+        val.extend(sessions[val_id])
+    for test_id in test_ids:
+        test.extend(sessions[test_id])
+
+    return train, val, test
+
+def get_train_val_test_ids(count: int, train_ratio=0.7, val_ratio=0.2, test_ratio=0.1, **kwargs) -> Tuple[List[int], List[int], List[int]]:
+    assert count > 2
+
+    train = max(int(count * train_ratio), 1)
+    val = max(int(count * val_ratio), 1)
+    test = max(int(count * test_ratio), 1)
+
+    remainder = count - (val + train + test)
+
+    train += remainder
+
+    all_indices = np.arange(count)
+    np.random.shuffle(all_indices)
+
+    train_ids = all_indices[:train].tolist()
+    val_ids = all_indices[train:train + val].tolist()
+    test_ids = all_indices[train + val:].tolist()
+
+    return (train_ids, val_ids, test_ids)
+
+def get_recordings_by_strategy(is_train=True, preprocessed_dir='preprocessed', **kwargs) -> Tuple[dict, dict]:
     save_path = os.path.join(base, preprocessed_dir)
     tensor_paths = sorted(glob.glob(os.path.join(save_path, '*.pt')))
-    # trial_paths = []
-    subs = defaultdict(lambda: ({}, {}))
+    if not tensor_paths:
+        raise ValueError(f'No recordings in {save_path}')
     word_index = {}
-    for path in tensor_paths:
+    remove_i = None
+    for i, path in enumerate(tensor_paths):
         name = os.path.basename(path)
-        if re.match('sub-\d+_\d+_\d+\.pt', name):
-            sub, sess, story = name.split('_')
-            subs[sub][int(sess)][story] = path
-            # trial_paths.append(path)
         if name == 'word_index.pt':
             word_index = torch.load(path, weights_only=True)
+            remove_i = i
+    if remove_i is None:
+        raise ValueError('Couldn\'t find word_index.')
+    tensor_paths.pop(remove_i)
     
-    if strategy == 'session':
-        sessions = flatten_subs(subs)
+    splits = split_recordings(tensor_paths, **kwargs)
 
+    splits = load_preprocessed_by_mode(splits, is_train)
 
-    # elif strategy == 'sub':
+    return splits, word_index
 
-
-def split_by_sub(subs, is_train=True):
-    sub_count = len(subs)
-
-    train_subs = {}
-    val_subs = {}
-    test_subs = {}    
-
-    train_ids, val_ids, test_ids = split_subs(sub_count)
-
-    for sub in subs:
-        for session in range(2):
-            for trial_path in subs[sub][session]:
-                name = os.path.basename(path)
-                train_subs[name] = torch.load(path, weights_only=True)
-    
+def load_preprocessed_by_mode(splits: Tuple[List[str], List[str], List[str]], is_train=True):
+    train, val, test = splits
+    load = lambda path: torch.load(path, weights_only=True)
     if is_train:
-        for idx in train_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            train_subs[name] = torch.load(path, weights_only=True)
-        
-        for idx in val_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            val_subs[name] = torch.load(path, weights_only=True)
+        train = list(map(load, train))
+        val = list(map(load, val))
+        test = []
     else:
-        for idx in test_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            test_subs[name] = torch.load(path, weights_only=False)
-
-    # reuse the same sub if only 1 sub (this is only for development)
-    if sub_count == 1:
-        
-        sub_path = sub_paths[0]
-        name = os.path.basename(sub_path)
-        sub = torch.load(sub_path, weights_only=True)
-        train_subs[name], val_subs[name], test_subs[name] = sub, sub, sub
+        test = list(map(load, test))
+        train, val = [], []
     
-    # use 1 sub for train and reuse a separate sub for val and test (this is only for development)
-    if sub_count == 2:
-        train_path = sub_paths[0]
-        val_test_path = sub_paths[1]
-        train_name = os.path.basename(train_path)
-        val_test_name = os.path.basename(val_test_path)
-        train_subs[train_name] = torch.load(train_path, weights_only=True)
-        val_subs[val_test_name] = torch.load(val_test_path, weights_only=True)
-        test_subs[val_test_name] = val_subs[val_test_name]
-    
-    if sub_count < 3:
-        return train_subs, val_subs, test_subs
-
-    train_ids, val_ids, test_ids = split_subs(sub_count)
-
-    if is_train:
-        for idx in train_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            train_subs[name] = torch.load(path, weights_only=True)
-        
-        for idx in val_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            val_subs[name] = torch.load(path, weights_only=True)
-    else:
-        for idx in test_ids:
-            path = sub_paths[idx]
-            name = os.path.basename(path)
-            test_subs[name] = torch.load(path, weights_only=False)
-
-    return (train_subs, val_subs, test_subs)
-
+    return train, val, test
 
 def load_preprocessed(is_train=True, preprocessed_dir='preprocessed', **kwargs) -> Tuple[dict, dict]:
     save_path = os.path.join(base, preprocessed_dir)
@@ -235,31 +275,29 @@ def shuffle_samples(trials):
         trials[i]['audio'] = trials[i]['audio'][ids]
         trials[i]['w_lbs'] = trials[i]['w_lbs'][ids]
 
-def get_dataset(subs: dict, mini_batches_per_trial=1, samples_per_mini_batch=64, **kwargs):
+def get_dataset(recordings: list, mini_batches_per_trial=1, samples_per_mini_batch=64, **kwargs):
 
-    trials = flatten_subs(subs)
+    shuffle_samples(recordings)
 
-    shuffle_samples(trials)
-
-    dset = Trials_Dataset(trials, mini_batches_per_trial=mini_batches_per_trial, samples_per_mini_batch=samples_per_mini_batch)
+    dset = Trials_Dataset(recordings, mini_batches_per_trial=mini_batches_per_trial, samples_per_mini_batch=samples_per_mini_batch)
 
     return dset
 
 def get_datasets(is_train=True, train_kwargs={}, val_kwargs={}, **kwargs):
     torch.cuda.empty_cache()
-    (train_subs, val_subs, test_subs), word_index = load_preprocessed(is_train=is_train, **kwargs)
+    (train, val, test), word_index = get_recordings_by_strategy(is_train=is_train, **kwargs)
 
     if is_train:
-        train_dset = get_dataset(train_subs, **kwargs, **train_kwargs)
-        val_dset = get_dataset(val_subs, **kwargs, **val_kwargs)
+        train_dset = get_dataset(train, **kwargs, **train_kwargs)
+        val_dset = get_dataset(val, **kwargs, **val_kwargs)
         return train_dset, val_dset, word_index
     else:
-        test_dset = get_dataset(test_subs, **kwargs)
+        test_dset = get_dataset(test, **kwargs)
         return test_dset, word_index
     
 def test_get_datasets():
-    train_dset, val_dset, word_index = get_datasets(is_train=True, mini_batches_per_trial=2, samples_per_mini_batch=64)
-    print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
+    train_dset, val_dset, word_index = get_datasets(is_train=True, mini_batches_per_trial=2, samples_per_mini_batch=64, split_strategy='session')
+    print(f'train len: {len(train_dset)}, val len: {len(val_dset)}, word_index len: {len(word_index)}')
 
 if __name__ == '__main__':
     test_get_datasets()
