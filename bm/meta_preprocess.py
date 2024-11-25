@@ -242,7 +242,7 @@ def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_i
             continue
         
         spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4, n_jobs=2)
+                                                n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
 
         data, freqs = spectrums.get_data(return_freqs=True)
 
