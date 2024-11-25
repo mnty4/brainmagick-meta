@@ -16,7 +16,7 @@ simpleconv:
   complex_out: true
   glu: 2
   glu_context: 1
-  merger: true
+  merger: false
   initial_linear: 270
   gelu: true
   merger_pos_dim: 2048

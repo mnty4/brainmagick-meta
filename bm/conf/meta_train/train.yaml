@@ -1,0 +1,5 @@
+train:
+  mini_batches_per_trial: 4
+  samples_per_mini_batch: 64
+  batch_size: 4
+  do_meta_train: False
