@@ -6,10 +6,9 @@ defaults:
   - feature_model: none            # model to extract features, e.g. DeepMel
   - selections: selections_definitions
   - study_paths: study_paths
-  - meta_train:
-    - train
-    - val
-    - test
+  - meta_train: defaults
+  - meta_test: defaults
+  - meta_preprocess: defaults
 
 # Wandb config
 wandb:
@@ -79,7 +78,7 @@ dset:
     - gwilliams2022
   tmin: -0.5
   tmax: 2.5
-  n_recordings: 17
+  n_recordings: 4
   n_subjects:                   # If provided, will take recordings so have no more
                                 #   than  that many subjects.
   n_subjects_test:              # Same but only for the test set. Should always be less

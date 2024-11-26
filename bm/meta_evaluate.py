@@ -1,3 +1,12 @@
+from omegaconf import OmegaConf
+import typing as tp
+
+import torch.types
+from bm.train import override_args_
+from hydra import initialize, compose
+import hydra
+from bm.losses import ClipLoss
+from bm.meta_helpers import parse_to_input_batch_format
 import torch.nn.functional as F
 from collections import defaultdict
 from torch import optim
@@ -14,6 +23,7 @@ import logging
 from bm.meta_dataset2 import get_datasets
 from torch.utils.data import DataLoader
 from bm.setup_logging import configure_logging
+from bm.models import SimpleConv
 base = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
@@ -30,7 +40,6 @@ class RandomModule(Module):
         return {
             'clf_logits': torch.rand((x['eeg'].shape[0], self.num_classes))
         }
-    
     def generate(self, x):
         return self.forward(x)
 
@@ -38,14 +47,14 @@ class RandomModule(Module):
 torch.manual_seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def test(model_dir, **kwargs):
-    test_dset, word_index = get_datasets(is_train=False, **kwargs)
-    model, inner_optim = load_model(os.path.join(base, model_dir), word_index, **kwargs)
+def test(args, model_dir=None, **kwargs):
+    test_dset, word_index = get_datasets(is_train=False, **args.meta_test.dset)
+    model, inner_optim, loss_module = load_model(os.path.join(base, args.meta_test.model_dir), word_index, args=args, **kwargs)
     random_model = RandomModule(num_classes=len(word_index) // 2)
     
     test_loader = DataLoader(test_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
 
-    top_k_accs = top_k(model, test_loader, inner_optim=inner_optim, **kwargs)
+    top_k_accs = top_k(model, test_loader, inner_optim=inner_optim, loss_module=loss_module, **kwargs)
     top_k_accs_random = top_k(random_model, test_loader, model_type='random', **kwargs)
 
     # write to stdout and file
@@ -70,7 +79,7 @@ def log_results(top_k_accs, top_k_accs_random, save_dir='evals', ks: list = [1, 
         f.writelines(msgs)
 
 
-def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_encoder_on_support=False, inner_optim=None, loss_type='ce_loss', model_type="normal", **kwargs):
+def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_encoder_on_support=False, inner_optim=None, loss_type='ce_loss', model_type="normal", loss_module=None, **kwargs):
     correct_ks = np.zeros(len(ks))
     all_preds = defaultdict(int)
     total = 0
@@ -90,8 +99,13 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
                     batch['eeg'] = batch['eeg'].to(DEVICE)
                     batch['audio'] = batch['audio'].to(DEVICE)
                     batch['w_lbs'] = batch['w_lbs'].to(DEVICE)
-                    output = model.generate(batch)
-                    loss = output[loss_type].to(DEVICE)
+                    if callable(getattr(model, "generate", None)):
+                        output = model.generate(batch)
+                        loss = output[loss_type].to(DEVICE)
+                    else:
+                        input, batch, mask = parse_to_input_batch_format(batch, DEVICE)
+                        output = model(input, batch)
+                        loss = loss_module(output, batch.features, mask)
                     inner_optim.zero_grad()
                     loss.backward()
                     inner_optim.step()
@@ -103,12 +117,24 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
                     batch['eeg'] = batch['eeg'].to(DEVICE)
                     batch['audio'] = batch['audio'].to(DEVICE)
                     batch['w_lbs'] = batch['w_lbs'].to(DEVICE)
-                    output = model.generate(batch)
-                    logits = output['clf_logits'].to(DEVICE)
-                for j in range(len(ks)):
-                    _, top_k_indices = torch.topk(logits, k=ks[j], dim=-1)
-                    correct = top_k_indices.eq(batch['w_lbs'].view(-1, 1).expand_as(top_k_indices))
-                    correct_ks[j] += sum(correct.sum(dim=-1)).item()
+                    if callable(getattr(model, "generate", None)):
+                        output = model.generate(batch)
+                        logits = output['clf_logits'].to(DEVICE)
+                        for j in range(len(ks)):
+                            _, top_k_indices = torch.topk(logits, k=ks[j], dim=-1)
+                            correct = top_k_indices.eq(batch['w_lbs'].view(-1, 1).expand_as(top_k_indices))
+                            correct_ks[j] += sum(correct.sum(dim=-1)).item()
+                    else:
+                        input, curr_batch, mask = parse_to_input_batch_format(batch, DEVICE)
+                        output = model(input, curr_batch)
+                        logits: torch.Tensor = loss_module.get_scores(output, curr_batch.features)
+                        for j in range(len(ks)):
+                            if ks[j] > logits.shape[-1]:
+                                continue
+                            _, top_k_indices = torch.topk(logits, k=ks[j], dim=-1)
+                            correct = top_k_indices.eq(torch.arange(0, logits.shape[0]).unsqueeze(-1).to(DEVICE)).any(dim=1)
+                            correct_ks[j] += correct.sum().item()
+
                 total += logits.shape[0]
                 preds = torch.argmax(logits, dim=1)
                 for pred in preds:
@@ -118,7 +144,7 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
     return correct_ks / total
 
 
-def load_model(model_dir, word_index, type='classifier_head', inner_lr=0.001, **kwargs):
+def load_model(model_dir, word_index, args=None, type='classifier_head', inner_lr=0.001, **kwargs):
     """
     'meta_epoch': meta_epoch,
             'batch': i,
@@ -128,27 +154,49 @@ def load_model(model_dir, word_index, type='classifier_head', inner_lr=0.001, **
             'inner_optim_state_dict': inner_optim.state_dict(),
             'loss': loss,
 """
+    
+
     loaded = torch.load(model_dir)
     model_state_dict = loaded['model_state_dict']
-    model_cls = registry.get_model_class("Clip-Audio-Emformer")
 
-    if type == 'classifier_head':
+    if type == 'simple_conv':
+        model = SimpleConv(in_channels=dict(meg=208), out_channels=1024,
+                           n_subjects=5, **args.simpleconv)
+        kw = dict(args.clip)
+        kw.pop('save_best', None)
+        kw.pop('sync_grad', None)
+        loss_module = ClipLoss(**kw, dset_args=args.dset)
+        optargs = args.optim
+        params = list(model.parameters())
+        if optargs.name == "adam":
+            inner_optim = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+
+    elif type == 'classifier_head':
+        model_cls = registry.get_model_class("Clip-Audio-Emformer")
         clip_model = model_cls.from_config(type='base', use_classifier=False)
         model = EEG_Encoder_Classification_Head(eeg_encoder=clip_model.eeg_encoder, num_classes=len(word_index) // 2, eeg_projection=clip_model.eeg_projection)
+        if loaded['is_meta_train']:
+            inner_optim = optim.SGD(model.parameters(), inner_lr)
+        else:
+            inner_optim = optim.Adam(model.parameters(), inner_lr)
     elif type == 'classifier_combined':
+        model_cls = registry.get_model_class("Clip-Audio-Emformer")
         model = model_cls.from_config(type='base', num_classes=len(word_index) // 2, use_classifier=True)
+        if loaded['is_meta_train']:
+            inner_optim = optim.SGD(model.parameters(), inner_lr)
+        else:
+            inner_optim = optim.Adam(model.parameters(), inner_lr)
+    else:
+        raise ValueError('Invalid type specified')
     # elif type == 'clip':
     #     model = model_cls.from_config(type='base', use_classifier=False)
     #     load_
 
-    if loaded['is_meta_train']:
-        inner_optim = optim.SGD(model.parameters(), inner_lr)
-    else:
-        inner_optim = optim.Adam(model.parameters(), inner_lr)
+    
 
     model.load_state_dict(model_state_dict)
     model.to(DEVICE)
-    return model, inner_optim
+    return model, inner_optim, loss_module
 
 def test_model():
     pass
@@ -374,20 +422,59 @@ def test_model():
 #         plt.cla()
 #         plt.clf()        
 
+def run(args):
+    kwargs: tp.Dict[str, tp.Any]
+    kwargs = OmegaConf.to_container(args.dset, resolve=True)  # type: ignore
+    selections = [args.selections[x] for x in args.dset.selections]
+    kwargs["selections"] = selections
+    if args.optim.loss == "clip":
+        kwargs['extra_test_features'].append("WordHash")
+
+    # return get_raw_events(**kwargs, num_workers=args.num_workers)
+    # return preprocess_words_test(**kwargs, num_workers=args.num_workers)
+
+    kwargs['offset'] = 0.15
+
+    return test(dset_args = args.meta_test.dset, args=args, type='simple_conv')
+
+# @hydra_main(config_name="config", config_path="conf", version_base="1.1")
+def main(args: tp.Any) -> float:
+    print('hello there good sir.')
+    override_args_(args)
+
+    global __file__  # pylint: disable=global-statement,redefined-builtin
+    # Fix bug when using multiprocessing with Hydra
+    __file__ = hydra.utils.to_absolute_path(__file__)
+
+    from . import env  # we need this here otherwise submitit pickle does crazy stuff.
+    # Updating paths in config that should stay relative to the original working dir
+    with env.temporary_from_args(args):
+        torch.set_num_threads(1)
+        logger.info(f"For logs, checkpoints and samples, check {os.getcwd()}.")
+        logger.info(f"Caching intermediate data under {args.cache}.")
+        logger.debug(args)
+        return run(args)
+
+
+    if '_BM_TEST_PATH' in os.environ:
+        main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
 if __name__ == '__main__':
+    with initialize(version_base="1.1", config_path="conf"):
+        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
     configure_logging()
     # model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v26/best_checkpoint_0_142.pth'
     # model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v1/best_checkpoint_3_142.pth'
-    model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v3/best_checkpoint_0_33.pth'
+    # model_dir = '/home/lukas/projects/brainmagick/bm/runs/non_meta_v3/best_checkpoint_0_33.pth'
 
-    ks = [1, 5, 15, 50, 500, 1500]
-    # test(model_dir, seed=42, ks=ks)
-    test_kwargs = {
-        'mini_batches_per_trial': 8, 
-        'samples_per_mini_batch': 8, 
-        'batch_size': 1,
-        'unfreeze_encoder_on_support': False,
-        'n_shot': 4,
-    }
-    test(model_dir, seed=42, ks=ks, type='classifier_combined', loss_type='combined_loss', **test_kwargs)
+    # ks = [1, 5, 15, 50, 500, 1500]
+    # # test(model_dir, seed=42, ks=ks)
+    # test_kwargs = {
+    #     'mini_batches_per_trial': 8, 
+    #     'samples_per_mini_batch': 8, 
+    #     'batch_size': 1,
+    #     'unfreeze_encoder_on_support': False,
+    #     'n_shot': 4,
+    # }
+    # test(model_dir, seed=42, ks=ks, type='classifier_combined', loss_type='combined_loss', **test_kwargs)
+    main(cfg)

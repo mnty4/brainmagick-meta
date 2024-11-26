@@ -139,6 +139,16 @@ def normalise(data):
     normalised = (data - mean) / std
     return normalised
 
+def robust_scale(data):
+    q25 = np.percentile(data, 25, axis=1, keepdims=True)
+    q75 = np.percentile(data, 75, axis=1, keepdims=True)
+    iqr = q75 - q25
+    median = np.median(data, axis=1, keepdims=True)
+    scaled_data = (data - median) / iqr
+    transformed_data = 0.25 + (scaled_data + 1) * (0.75 - 0.25) / 2
+    
+    return transformed_data
+
 def apply_clamp(data):
 
     mean = data.mean(axis=1, keepdims=True)
@@ -161,7 +171,7 @@ def preprocess_raws(raws, random_noise=False, **kwargs):
         else:
             data = apply_baseline(raw, data)
             data = apply_clamp(data)
-            data = normalise(data)
+            data = robust_scale(data)
 
         raw._data = data
 
@@ -176,7 +186,7 @@ def preprocess_raw(raw, random_noise=False, **kwargs):
 
     raw._data = data
 
-def preprocess_words(save_dir='preprocessed', by_sub=False, num_workers=2, **kwargs):
+def preprocess_words(args, save_dir='preprocessed', by_sub=False, num_workers=2, **kwargs):
     save_path = os.path.join(base, save_dir)
     os.makedirs(save_path, exist_ok=True)
 
@@ -191,7 +201,7 @@ def preprocess_words(save_dir='preprocessed', by_sub=False, num_workers=2, **kwa
 
     start = timer()
     logger.info(f'Saving tensors to "{save_path}"...')
-    preprocess_recordings_parallel_two_step(raws, events, infos, save_path, num_workers=3, **kwargs)
+    preprocess_recordings_parallel_two_step(raws, events, infos, save_path, num_workers=3, **args.meta_preprocess)
     end = timer()
     print(f"time taken to preprocess recordings: {end - start}")
 
@@ -211,7 +221,7 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     
     # return train, valid, test
 
-def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 64, audio_embedding_length=30, **kwargs):
+def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 63, audio_embedding_length=30, uniform_signal_len=25, to_psd=False, window_size=None, **kwargs):
     if not generate_embeddings:
         generate_embeddings = SpeechEmbeddings(device='cuda')
     
@@ -233,21 +243,35 @@ def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_i
 
         raw_start = raw_start + offset
         raw_end = raw_start + duration
-
+        if window_size:
+            tail_size = (window_size - duration) / 2
+            raw_start = raw_start - tail_size
+            duration = window_size
+            raw_end = raw_start + duration
+            word_start -= tail_size
+            
         t_idxs = raw.time_as_index([raw_start, raw_end])
         data, times = raw[:, t_idxs[0]:t_idxs[1]] 
-
-        if data.shape[-1] <= n_fft // 4:
-            skipped += 1
-            continue
         
-        spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
-
-        data, freqs = spectrums.get_data(return_freqs=True)
+        if to_psd:
+            if data.shape[-1] <= n_fft // 4:
+                skipped += 1
+                continue
+            spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
+                                                    n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
+            data, freqs = spectrums.get_data(return_freqs=True)
+        else:
+            if data.shape[-1] < 15:
+                skipped += 1
+                continue
+            to_pad = uniform_signal_len - data.shape[-1]
+            if to_pad > 0:
+                data = np.pad(data, ((0, 0), (0, to_pad)), mode="constant")
+            elif to_pad < 0:
+                data = data[:, :uniform_signal_len]
 
         audio_embedding = generate_embeddings.get_audio_embeddings(wav_path, word_start, duration,
-                                                                    audio_embedding_length=audio_embedding_length)
+                                                                    audio_embedding_length=uniform_signal_len)
         if word_label in word_index:
             word_id = word_index[word_label]
         else:
@@ -278,7 +302,7 @@ def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_i
 def save_recording(save_path, recording):
     torch.save(recording, os.path.join(save_path, f'{recording["sub_id"]}_{recording["session_id"]}_{int(recording["story_uid"])}.pt'))
 
-def prepare_for_preprocessing(raws: List[Raw], events: List[pd.DataFrame], infos, offset = 0., n_fft = 64, **kwargs) -> Tuple[dict, List[int]]:
+def prepare_for_preprocessing(raws: List[Raw], events: List[pd.DataFrame], infos, offset = 0., n_fft = 63, to_psd=False, window_size=None, **kwargs) -> Tuple[dict, List[int]]:
     word_index = {}
     word_count = 0.
     session_ids = []
@@ -293,14 +317,24 @@ def prepare_for_preprocessing(raws: List[Raw], events: List[pd.DataFrame], infos
 
         for i, word_event in word_events.iterrows():
             raw_start, word_start, duration, word_label, wav_path = word_event['start'], word_event['audio_start'], word_event['duration'], word_event['word'], word_event['sound'] 
-            raw_start = raw_start + offset
-            raw_end = raw_start + duration
+            # raw_start = raw_start + offset
+            # raw_end = raw_start + duration
+            # if window_size:
+            #     tail_size = (window_size - duration) / 2
+            #     raw_start = raw_start - tail_size
+            #     duration = window_size
+            #     raw_end = raw_start + duration
+            #     word_start -= tail_size
+            # t_idxs = raw.time_as_index([raw_start, raw_end])
+            # data, times = raw[:, t_idxs[0]:t_idxs[1]] 
 
-            t_idxs = raw.time_as_index([raw_start, raw_end])
-            data, times = raw[:, t_idxs[0]:t_idxs[1]] 
-
-            if data.shape[-1] <= n_fft // 4:
-                continue
+            
+            # if to_psd:
+            #     if data.shape[-1] <= n_fft // 4:
+            #         continue
+            # else:
+            #     if data.shape[-1] < 15:
+            #         continue
 
             if word_label not in word_index:
                 word_index[word_label] = word_count
@@ -440,7 +474,7 @@ def run(args):
 
     kwargs['offset'] = 0.15
 
-    return preprocess_words(**kwargs, num_workers=args.num_workers, random_noise=True)
+    return preprocess_words(args, **kwargs, num_workers=args.num_workers, random_noise=True)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:

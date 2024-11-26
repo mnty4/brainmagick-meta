@@ -51,4 +51,4 @@ class SpeechEmbeddings:
         if audio_embeddings.shape[0] > audio_embedding_length:
             audio_embeddings = audio_embeddings[:audio_embedding_length]
 
-        return audio_embeddings
+        return audio_embeddings.transpose(0, 1)

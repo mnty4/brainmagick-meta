@@ -29,6 +29,7 @@ from bm.meta_dataset2 import get_datasets
 from typing import List
 from bm.models.classification_head import EEG_Encoder_Classification_Head
 from bm.meta_evaluate import test
+from bm.meta_helpers import Batch, parse_to_input_batch_format
 base = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
@@ -39,46 +40,6 @@ seed = 0
 torch.manual_seed(seed)
 np.random.seed(seed)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-class Batch:
-    def __init__(self, subject_index, recording_index, study_name, features):
-        self._subject_index = subject_index
-        self._recording_index = recording_index
-        self._study_name = study_name
-        self._features = features
-    @property
-    def features(self) -> int:
-        if self._features is None:
-            raise RuntimeError("Recording.features has not been initialized")
-        return self._features
-    @property
-    def subject_index(self) -> int:
-        if self._subject_index is None:
-            raise RuntimeError("Recording.subject_index has not been initialized")
-        return self._subject_index
-
-    @property
-    def recording_index(self) -> int:
-        if self._recording_index is None:
-            raise RuntimeError("Recording.recording_index has not been initialized")
-        return self._recording_index
-    
-    @classmethod
-    def study_name(self) -> str:
-        return self._study_name
-    
-def parse_to_input_batch_format(input_batch: dict) -> tp.Tuple[dict, dict]:
-    batch = Batch(
-                subject_index=torch.tensor([int(input_batch['sub_id'].split('-')[1])] * input_batch['eeg'].shape[0]).to(DEVICE), 
-                recording_index=[int(input_batch['story_uid'])] * input_batch['eeg'].shape[0],
-                study_name='gwilliams2022',
-                features=input_batch['audio'])
-    
-    input = dict(meg=input_batch['eeg'])
-
-    mask = torch.ones((input_batch['eeg'].shape[0], 1, input_batch['eeg'].shape[-1])).to(torch.bool)
-    
-    return input, batch, mask
 
 def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, inner_lr=0.1, loss_type='clip_loss', loss_module=None, **kwargs):
     """
@@ -94,6 +55,9 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
         "text_embeds": forward_output['text_embeds'],
         "clf_logits": forward_output['clf_logits'],}
     """
+
+    if not callable(getattr(model, "generate", None)) and loss_module is None:
+        raise ValueError('missing loss_module')
 
     old_weights = deepcopy(model.state_dict())
 
@@ -115,12 +79,9 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
             output = model.generate(batches[i])
             loss: torch.Tensor = output[loss_type]
         else:
-            input, batch, mask = parse_to_input_batch_format(batches[i])
+            input, batch, mask = parse_to_input_batch_format(batches[i], DEVICE)
             output = model(input, batch)
-            if loss_module is not None:
-                loss = loss_module(output, batch.features, mask)
-            else:
-                raise ValueError('missing loss_module')
+            loss = loss_module(output, batch.features, mask)  
         
         inner_optim.zero_grad()
         loss.backward()
@@ -135,8 +96,13 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
             batches[i]['eeg'] = batches[i]['eeg'].to(DEVICE)
             batches[i]['audio'] = batches[i]['audio'].to(DEVICE)
             batches[i]['w_lbs'] = batches[i]['w_lbs'].to(DEVICE)
-            output = model.generate(batches[i])
-            loss: torch.Tensor = output[loss_type]
+            if callable(getattr(model, "generate", None)):
+                output = model.generate(batches[i])
+                loss: torch.Tensor = output[loss_type]
+            else:
+                input, batch, mask = parse_to_input_batch_format(batches[i], DEVICE)
+                output = model(input, batch)
+                loss = loss_module(output, batch.features, mask)
             query_losses.append(loss.item())
 
     new_weights = deepcopy(model.state_dict())
@@ -375,11 +341,11 @@ def train_clip(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_met
     
     test(best_model_path, seed=42, ks=ks, type='clip', loss_type=loss_type, **test_kwargs)
 
-def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss'):
-    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
-    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, inner_lr=0.01, meta_lr=0.001):
+    # train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    # val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 
-    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs, **args.meta_train)
     print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
     train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
@@ -395,8 +361,8 @@ def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train
         raise ValueError(f'Invalid optimizer {args.optim}')
 
     if do_meta_train:
-        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
-        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+        meta_optim = optimizer
+        inner_optim = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
     else:
         meta_optim = None
         inner_optim = optimizer
@@ -412,19 +378,19 @@ def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train
                       args=args,
                       meta_optim=meta_optim, 
                       inner_optim=inner_optim,
-                      n_meta_epochs=n_meta_epochs,
+                      n_meta_epochs=args.meta_train.meta_epochs,
                       do_meta_train=do_meta_train,
                       model_name=model_name,
-                      loss_type=loss_type,
-                      loss_module=loss_module)
+                      loss_module=loss_module,
+                      delta=args.meta_train.delta)
     
     del model
     del train_loader
     del val_loader
     del word_index
     del inner_optim
-    ks = [1, 5, 15, 50, 500, 1500]
-    test(best_model_path, seed=42, ks=ks, type='simple_conv', loss_type=loss_type, **test_kwargs)
+    # ks = [1, 5, 15, 50, 500, 1500]
+    test(args, model_dir=best_model_path, seed=42, type='simple_conv', **test_kwargs)
     
 
 def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
@@ -632,10 +598,10 @@ def run_tests(args):
     # }
     meta_train_args = args.meta_train
     # print(args.meta_train.train.do_meta_train)
-    n_shot = meta_train_args.test.n_shot * meta_train_args.test.samples_per_mini_batch
-    n_way = meta_train_args.test.mini_batches_per_trial * meta_train_args.test.samples_per_mini_batch - n_shot
+    n_shot = args.meta_test.dset.n_shot * args.meta_test.dset.samples_per_mini_batch
+    n_way = args.meta_test.dset.mini_batches_per_trial * args.meta_test.dset.samples_per_mini_batch - n_shot
     model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
-    train_simple_conv(meta_train_args.train, meta_train_args.val, meta_train_args.test, args, model_name=model_name, n_meta_epochs=5)
+    train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
 
     # test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
     # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
@@ -702,7 +668,7 @@ if __name__ == "__main__":
     # torch.multiprocessing.set_start_method('spawn', force=True)
     main(cfg)
 
-if __name__ == '__main__':
-    configure_logging()
-    main()
+# if __name__ == '__main__':
+#     configure_logging()
+#     main()
     # run_tests()

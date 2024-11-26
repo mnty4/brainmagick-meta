@@ -1,0 +1,8 @@
+
+defaults:
+  - train
+  - val
+
+delta: 0.001
+meta_epochs: 20
+split_strategy: 'recording'
