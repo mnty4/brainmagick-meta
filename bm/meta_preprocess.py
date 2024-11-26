@@ -474,7 +474,7 @@ def run(args):
 
     kwargs['offset'] = 0.15
 
-    return preprocess_words(args, **kwargs, num_workers=args.num_workers, random_noise=True)
+    return preprocess_words(args, **kwargs, num_workers=args.num_workers, random_noise=False)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:

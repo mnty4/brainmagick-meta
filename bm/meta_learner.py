@@ -76,6 +76,8 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
         batches[i]['audio'] = batches[i]['audio'].to(DEVICE)
         batches[i]['w_lbs'] = batches[i]['w_lbs'].to(DEVICE)
         if callable(getattr(model, "generate", None)):
+            if batches[i]['audio'].shape[1] != batches[i]['eeg'].shape[2]:
+                batches[i]['audio'] = batches[i]['audio'].transpose(1, 2)
             output = model.generate(batches[i])
             loss: torch.Tensor = output[loss_type]
         else:
@@ -97,6 +99,8 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
             batches[i]['audio'] = batches[i]['audio'].to(DEVICE)
             batches[i]['w_lbs'] = batches[i]['w_lbs'].to(DEVICE)
             if callable(getattr(model, "generate", None)):
+                if batches[i]['audio'].shape[1] != batches[i]['eeg'].shape[2]:
+                    batches[i]['audio'] = batches[i]['audio'].transpose(1, 2)
                 output = model.generate(batches[i])
                 loss: torch.Tensor = output[loss_type]
             else:
@@ -393,34 +397,44 @@ def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train
     test(args, model_dir=best_model_path, seed=42, type='simple_conv', **test_kwargs)
     
 
-def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
-    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
-    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
+    # train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    # val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 
-    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs, **args.meta_train)
     print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
     train_loader = DataLoader(train_dset, batch_size=train_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=val_kwargs['batch_size'], shuffle=True, collate_fn=lambda x: x)
 
     model_cls = registry.get_model_class("Clip-Audio-Emformer")    
-    model = model_cls.from_config(type='base', num_classes = len(word_index) // 2)
+    model = model_cls.from_config(type='base', num_classes = len(word_index), use_classifier=True)
+    optargs = args.optim
+    params = list(model.parameters())
+    if optargs.name == "adam":
+        optimizer = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
     if do_meta_train:
-        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
-        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+        meta_optim = optimizer
+        inner_optim = optim.SGD(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+        # meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
+        # inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
     else:
         meta_optim = None
-        inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+        # inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+        inner_optim = optimizer
 
     inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
     best_model_path = meta_train(model, 
                       train_loader=train_loader, 
                       val_loader=val_loader, 
                       word_index=word_index, 
+                      args=args,
                       meta_optim=meta_optim, 
                       inner_optim=inner_optim,
-                      n_meta_epochs=n_meta_epochs,
+                      model_name=model_name,
+                      n_meta_epochs=args.meta_train.meta_epochs,
                       do_meta_train=do_meta_train,
-                      loss_type=loss_type)
+                      loss_type=loss_type,
+                      delta=args.meta_train.delta)
     
     ks = [1, 5, 15, 50, 500, 1500]
     del model
@@ -430,42 +444,52 @@ def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=Fals
     del word_index
     del inner_optim
     
-    test(best_model_path, seed=42, ks=ks, type='classifier_combined', loss_type=loss_type, **test_kwargs)
+    test(args, model_dir=best_model_path, seed=42, ks=ks, type='classifier_combined', loss_type=loss_type, **test_kwargs)
 
 
 
-def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, do_meta_train_for_head=False, n_meta_epochs=20, inner_lr=0.01, meta_lr=0.001, **kwargs):
-    train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
-    val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
+def train_clf_head(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, do_meta_train_for_head=False, **kwargs):
+    # train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
+    # val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 
-    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs)
+    train_dset, val_dset, word_index = get_datasets(is_train=True, train_kwargs=train_kwargs, val_kwargs=val_kwargs, **args.meta_train)
     print('dset lens: ', len(train_dset), len(val_dset), len(word_index))
     train_loader = DataLoader(train_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
     val_loader = DataLoader(val_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
 
     model_cls = registry.get_model_class("Clip-Audio-Emformer")    
     model = model_cls.from_config(type='base', use_classifier=False)
+    optargs = args.optim
+    params = list(model.parameters())
+    if optargs.name == "adam":
+        optimizer = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
     if do_meta_train:
-        meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
-        inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
+        meta_optim = optimizer
+        inner_optim = optim.SGD(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+        # meta_optim = optim.Adam(model.parameters(), lr=meta_lr)
+        # inner_optim = optim.SGD(model.parameters(), lr=inner_lr)
     else:
         meta_optim = None
-        inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
-    
+        # inner_optim = optim.Adam(model.parameters(), lr=inner_lr)
+        inner_optim = optimizer
+
     best_model_path = meta_train(model, 
                       train_loader=train_loader, 
                       val_loader=val_loader, 
                       word_index=word_index, 
+                      args=args,
                     #   meta_optim=meta_optim, 
                       inner_optim=inner_optim,
-                      n_meta_epochs=n_meta_epochs,
+                      model_name=model_name,
+                      n_meta_epochs=args.meta_train.meta_epochs,
                       do_meta_train=do_meta_train,
-                      loss_type='clip_loss')
+                      loss_type='clip_loss',
+                      delta=args.meta_train.delta)
 
     classification_head = EEG_Encoder_Classification_Head(
-        model.eeg_encoder, num_classes=len(word_index) // 2, eeg_projection=model.eeg_projection)
+        model.eeg_encoder, num_classes=len(word_index), eeg_projection=model.eeg_projection)
     
-    inner_classifier_optim = optim.Adam(classification_head.parameters(), lr=0.001)
+    inner_classifier_optim = optim.Adam(classification_head.parameters(), lr=3e-4)
 
     best_classifier_model_path = meta_train(classification_head,
                     #  save_dir=best_model_path,
@@ -473,11 +497,12 @@ def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, d
                       val_loader=val_loader, 
                       word_index=word_index, 
                     #   meta_optim=meta_optim, 
+                        args=args,
                       inner_optim=inner_classifier_optim,
-                      n_meta_epochs=n_meta_epochs,
+                      n_meta_epochs=args.meta_train.meta_epochs,
                       do_meta_train=do_meta_train_for_head,
                       train_type='classifier',
-                      loss_type='ce_loss')
+                      loss_type='clf_loss')
 
     del model
     del model_cls
@@ -486,7 +511,7 @@ def train_clf_head(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, d
     del inner_optim
     
     ks = [1, 5, 15, 50, 500, 1500]
-    test(best_classifier_model_path, seed=42, ks=ks, type='classifier_head', loss_type='ce_loss', **test_kwargs)
+    test(args, model_dir=best_classifier_model_path, seed=42, ks=ks, type='classifier_head', loss_type='ce_loss', **test_kwargs)
 
 
 # def test_meta_train_combined_clf():
@@ -601,8 +626,11 @@ def run_tests(args):
     n_shot = args.meta_test.dset.n_shot * args.meta_test.dset.samples_per_mini_batch
     n_way = args.meta_test.dset.mini_batches_per_trial * args.meta_test.dset.samples_per_mini_batch - n_shot
     model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
-    train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
-
+    # train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
+    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_clf_head_{n_shot}_shot_{n_way}_way'
+    # train_clf_head(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
+    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_combined_clf_{n_shot}_shot_{n_way}_way'
+    train_combined_clf(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
     # test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
     # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
     # test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'

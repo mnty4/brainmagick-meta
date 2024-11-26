@@ -155,10 +155,10 @@ def load_model(model_dir, word_index, args=None, type='classifier_head', inner_l
             'loss': loss,
 """
     
-
+    optargs = args.optim
     loaded = torch.load(model_dir)
     model_state_dict = loaded['model_state_dict']
-
+    loss_module = None
     if type == 'simple_conv':
         model = SimpleConv(in_channels=dict(meg=208), out_channels=1024,
                            n_subjects=5, **args.simpleconv)
@@ -166,7 +166,6 @@ def load_model(model_dir, word_index, args=None, type='classifier_head', inner_l
         kw.pop('save_best', None)
         kw.pop('sync_grad', None)
         loss_module = ClipLoss(**kw, dset_args=args.dset)
-        optargs = args.optim
         params = list(model.parameters())
         if optargs.name == "adam":
             inner_optim = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
@@ -174,18 +173,18 @@ def load_model(model_dir, word_index, args=None, type='classifier_head', inner_l
     elif type == 'classifier_head':
         model_cls = registry.get_model_class("Clip-Audio-Emformer")
         clip_model = model_cls.from_config(type='base', use_classifier=False)
-        model = EEG_Encoder_Classification_Head(eeg_encoder=clip_model.eeg_encoder, num_classes=len(word_index) // 2, eeg_projection=clip_model.eeg_projection)
+        model = EEG_Encoder_Classification_Head(eeg_encoder=clip_model.eeg_encoder, num_classes=len(word_index), eeg_projection=clip_model.eeg_projection)
         if loaded['is_meta_train']:
-            inner_optim = optim.SGD(model.parameters(), inner_lr)
+            inner_optim = optim.SGD(model.parameters(), lr=optargs.lr, betas=(0.9, optargs.beta2))
         else:
-            inner_optim = optim.Adam(model.parameters(), inner_lr)
+            inner_optim = optim.Adam(model.parameters(), lr=optargs.lr, betas=(0.9, optargs.beta2))
     elif type == 'classifier_combined':
         model_cls = registry.get_model_class("Clip-Audio-Emformer")
-        model = model_cls.from_config(type='base', num_classes=len(word_index) // 2, use_classifier=True)
+        model = model_cls.from_config(type='base', num_classes=len(word_index), use_classifier=True)
         if loaded['is_meta_train']:
-            inner_optim = optim.SGD(model.parameters(), inner_lr)
+            inner_optim = optim.SGD(model.parameters(), lr=optargs.lr, betas=(0.9, optargs.beta2))
         else:
-            inner_optim = optim.Adam(model.parameters(), inner_lr)
+            inner_optim = optim.Adam(model.parameters(), lr=optargs.lr, betas=(0.9, optargs.beta2))
     else:
         raise ValueError('Invalid type specified')
     # elif type == 'clip':
