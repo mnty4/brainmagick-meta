@@ -1,0 +1,8 @@
+# @package _global_
+
+to_psd: True
+n_fft: 64
+uniform_signal_len: 31
+window_size: 0.8
+n_overlap: 16
+n_per_seg: 32

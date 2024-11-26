@@ -4,7 +4,7 @@ ks: [1, 5, 15, 50]
 
 dset: 
   mini_batches_per_trial: 8
-  samples_per_mini_batch: 8
+  samples_per_mini_batch: 64
   batch_size: 1
   unfreeze_encoder_on_support: False
   n_shot: 4

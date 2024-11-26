@@ -1,3 +1,5 @@
+import sys
+from dora import hydra_main
 from bm.losses import ClipLoss
 from hydra import initialize, compose
 from .train import override_args_
@@ -626,11 +628,11 @@ def run_tests(args):
     n_shot = args.meta_test.dset.n_shot * args.meta_test.dset.samples_per_mini_batch
     n_way = args.meta_test.dset.mini_batches_per_trial * args.meta_test.dset.samples_per_mini_batch - n_shot
     model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
-    # train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
+    train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
     model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_clf_head_{n_shot}_shot_{n_way}_way'
     # train_clf_head(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
     model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_combined_clf_{n_shot}_shot_{n_way}_way'
-    train_combined_clf(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
+    # train_combined_clf(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
     # test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
     # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)
     # test_kwargs['model_name'] = 'no_meta_clf_head_4_4_8_shot_4_8'
@@ -688,10 +690,10 @@ def main(args: tp.Any) -> float:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
 if __name__ == "__main__":
+    cmd_args = sys.argv[1:]
     with initialize(version_base="1.1", config_path="conf"):
-        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
-        # simple_conv_cfg = compose(config_name="model/clip_conv.yaml")
-        # cfg['simpleconv'] = simple_conv_cfg
+        cfg = compose(config_name="config.yaml", overrides=cmd_args + ['+HYDRA_FULL_ERROR=1'])
+
     configure_logging()
     # torch.multiprocessing.set_start_method('spawn', force=True)
     main(cfg)

@@ -1,8 +1,0 @@
-
-dset: 
-  mini_batches_per_trial: 8
-  samples_per_mini_batch: 8
-  batch_size: 1
-  unfreeze_encoder_on_support: False
-  n_shot: 4
-  split_strategy: 'recording'

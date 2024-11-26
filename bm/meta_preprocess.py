@@ -1,3 +1,4 @@
+import sys
 from timeit import default_timer as timer
 from functools import partial
 # from multiprocessing import Pool
@@ -221,7 +222,7 @@ def split_dataset(subs: dict, seed, by_trial=False, **kwargs):
     
     # return train, valid, test
 
-def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 63, audio_embedding_length=30, uniform_signal_len=25, to_psd=False, window_size=None, **kwargs):
+def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_index, save_path, generate_embeddings = None, word_count=None, by_sub=False, offset = 0., n_fft = 128, n_per_seg=64, n_overlap=32, audio_embedding_length=30, uniform_signal_len=25, to_psd=False, window_size=None, **kwargs):
     if not generate_embeddings:
         generate_embeddings = SpeechEmbeddings(device='cuda')
     
@@ -258,7 +259,7 @@ def preprocess_recording(raw: Raw, event: pd.DataFrame, info, session_id, word_i
                 skipped += 1
                 continue
             spectrums: Spectrum = raw.compute_psd(tmin=raw_start, tmax=raw_end, fmax=60, 
-                                                    n_fft=n_fft, verbose=False, n_per_seg=n_fft // 2, n_overlap=n_fft // 4)
+                                                    n_fft=n_fft, verbose=False, n_per_seg=n_per_seg, n_overlap=n_overlap)
             data, freqs = spectrums.get_data(return_freqs=True)
         else:
             if data.shape[-1] < 15:
@@ -499,8 +500,9 @@ def main(args: tp.Any) -> float:
         main.dora.dir = Path(os.environ['_BM_TEST_PATH'])
 
 if __name__ == "__main__":
+    cmd_args = sys.argv[1:]
     with initialize(version_base="1.1", config_path="conf"):
-        cfg = compose(config_name="config.yaml", overrides=['+HYDRA_FULL_ERROR=1'])
+        cfg = compose(config_name="config.yaml", overrides=cmd_args + ['+HYDRA_FULL_ERROR=1'])
     configure_logging()
     torch.multiprocessing.set_start_method('spawn', force=True)
     main(cfg)

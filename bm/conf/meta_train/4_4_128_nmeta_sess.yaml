@@ -1,0 +1,17 @@
+# @package _global_
+
+meta_train:
+  delta: 0.001
+  meta_epochs: 20
+  split_strategy: 'session'
+
+  train:
+    mini_batches_per_trial: 1
+    samples_per_mini_batch: 128
+    batch_size: 1
+    do_meta_train: False
+
+  val:
+    mini_batches_per_trial: 1
+    samples_per_mini_batch: 128
+    batch_size: 1

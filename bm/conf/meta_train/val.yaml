@@ -1,4 +1,0 @@
-val:
-  mini_batches_per_trial: 4
-  samples_per_mini_batch: 8
-  batch_size: 4

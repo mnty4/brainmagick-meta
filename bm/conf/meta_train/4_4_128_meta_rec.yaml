@@ -3,15 +3,15 @@
 meta_train:
   delta: 0.001
   meta_epochs: 20
-  split_strategy: recording
+  split_strategy: 'recording'
 
   train:
     mini_batches_per_trial: 4
-    samples_per_mini_batch: 8
+    samples_per_mini_batch: 128
     batch_size: 4
-    do_meta_train: False
+    do_meta_train: True
 
   val:
     mini_batches_per_trial: 4
-    samples_per_mini_batch: 8
-    batch_size: 4 
+    samples_per_mini_batch: 128
+    batch_size: 4
