@@ -90,7 +90,9 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
         inner_optim.zero_grad()
         loss.backward()
         inner_optim.step()
-
+        batches[i]['eeg'] = batches[i]['eeg'].to('cpu')
+        batches[i]['audio'] = batches[i]['audio'].to('cpu')
+        batches[i]['w_lbs'] = batches[i]['w_lbs'].to('cpu')
         supp_losses.append(loss.item())
 
     query_losses = []
@@ -110,6 +112,9 @@ def train_inner_loop(model: Module, batches, args, inner_optim=None, n_query=0, 
                 output = model(input, batch)
                 loss = loss_module(output, batch.features, mask)
             query_losses.append(loss.item())
+            batches[i]['eeg'] = batches[i]['eeg'].to('cpu')
+            batches[i]['audio'] = batches[i]['audio'].to('cpu')
+            batches[i]['w_lbs'] = batches[i]['w_lbs'].to('cpu')
 
     new_weights = deepcopy(model.state_dict())
 
