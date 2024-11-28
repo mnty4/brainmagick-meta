@@ -241,9 +241,12 @@ def update_params_optim(model: Module, weights_before: dict, new_state_dicts: Li
 
     optimizer.zero_grad()
     with torch.no_grad():  # Ensure we're not tracking gradients here
-        for param, key in zip(model.parameters(), weights_before.keys()):
-            # Apply the interpolation update directly
-            param.add_(average_after[key] - weights_before[key])
+        for key, param in model.named_parameters():
+            updated = average_after[key] - weights_before[key]
+            param.add_(updated)
+        # for param, key in zip(model.parameters(), weights_before.keys()):
+        #     # Apply the interpolation update directly
+        #     param.add_(average_after[key] - weights_before[key])
 
     optimizer.step()
 
@@ -352,7 +355,7 @@ def train_clip(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, n_met
     
     test(best_model_path, seed=42, ks=ks, type='clip', loss_type=loss_type, **test_kwargs)
 
-def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, inner_lr=0.01, meta_lr=0.001):
+def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, inner_lr=0.01, meta_lr=0.001, **kwargs):
     # train_kwargs = {'mini_batches_per_trial': 1, 'samples_per_mini_batch': 128, 'batch_size': 2, **train_kwargs}
     # val_kwargs = {'mini_batches_per_trial': 2, 'samples_per_mini_batch': 128, 'batch_size': 2, **val_kwargs}
 
@@ -373,7 +376,7 @@ def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train
 
     if do_meta_train:
         meta_optim = optimizer
-        inner_optim = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+        inner_optim = optim.SGD(params, lr=inner_lr)
     else:
         meta_optim = None
         inner_optim = optimizer
@@ -401,7 +404,7 @@ def train_simple_conv(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train
     del word_index
     del inner_optim
     # ks = [1, 5, 15, 50, 500, 1500]
-    test(args, model_dir=best_model_path, seed=42, type='simple_conv', **test_kwargs)
+    test(args, model_dir=best_model_path, seed=42, type='simple_conv', **test_kwargs, inner_lr=inner_lr)
     
 
 def train_combined_clf(train_kwargs, val_kwargs, test_kwargs, args, do_meta_train=False, model_name=None, inner_lr=0.01, meta_lr=0.001, loss_type='combined_loss', **kwargs):
@@ -632,11 +635,11 @@ def run_tests(args):
     # print(args.meta_train.train.do_meta_train)
     n_shot = args.meta_test.dset.n_shot * args.meta_test.dset.samples_per_mini_batch
     n_way = args.meta_test.dset.mini_batches_per_trial * args.meta_test.dset.samples_per_mini_batch - n_shot
-    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
-    train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
-    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_clf_head_{n_shot}_shot_{n_way}_way'
+    model_name = f'{"meta" if args.meta_train.do_meta_train else "no_meta"}_simple_conv_{n_shot}_shot_{n_way}_way'
+    train_simple_conv(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name, **args.meta_train)
+    model_name = f'{"meta" if args.meta_train.do_meta_train else "no_meta"}_clf_head_{n_shot}_shot_{n_way}_way'
     # train_clf_head(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
-    model_name = f'{"meta" if args.meta_train.train.do_meta_train else "no_meta"}_combined_clf_{n_shot}_shot_{n_way}_way'
+    model_name = f'{"meta" if args.meta_train.do_meta_train else "no_meta"}_combined_clf_{n_shot}_shot_{n_way}_way'
     # train_combined_clf(meta_train_args.train, meta_train_args.val, args.meta_test.dset, args, model_name=model_name)
     # test_kwargs['model_name'] = 'no_meta_combined_clf_4_4_8_shot_4_8'
     # train_combined_clf(train_kwargs, val_kwargs, test_kwargs, do_meta_train=False, **kwargs)

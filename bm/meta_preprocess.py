@@ -165,6 +165,7 @@ def apply_noise(data):
 
 # inplace
 def preprocess_raws(raws, random_noise=False, **kwargs):
+    logger.info(f'Using random_noise = {random_noise}.')
     for raw in raws:
         data = raw.get_data()
         if random_noise:
@@ -196,7 +197,7 @@ def preprocess_words(args, save_dir='preprocessed', by_sub=False, num_workers=2,
     # with Pool(num_workers) as p:
     #     p.map(partial(preprocess_raw, **kwargs), raws)
 
-    preprocess_raws(raws, **kwargs)
+    preprocess_raws(raws, **kwargs, **args.meta_preprocess)
     end = timer()
     print(f"time taken to preprocess raws: {end - start}")
 
@@ -475,7 +476,7 @@ def run(args):
 
     kwargs['offset'] = 0.15
 
-    return preprocess_words(args, **kwargs, num_workers=args.num_workers, random_noise=False)
+    return preprocess_words(args, **kwargs, num_workers=args.num_workers)
 
 # @hydra_main(config_name="config", config_path="conf", version_base="1.1")
 def main(args: tp.Any) -> float:

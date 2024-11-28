@@ -1,6 +1,7 @@
+from sklearn.metrics import precision_score, recall_score, f1_score
 from omegaconf import OmegaConf
 import typing as tp
-
+import matplotlib.pyplot as plt
 import torch.types
 from bm.train import override_args_
 from hydra import initialize, compose
@@ -54,14 +55,36 @@ def test(args, model_dir=None, **kwargs):
     
     test_loader = DataLoader(test_dset, batch_size=2, shuffle=True, collate_fn=lambda x: x)
 
-    top_k_accs = top_k(model, test_loader, inner_optim=inner_optim, loss_module=loss_module, **kwargs)
-    top_k_accs_random = top_k(random_model, test_loader, model_type='random', **kwargs)
+    metrics = {}
+
+    top_k_accs, all_preds, ground_truth = evaluate(model, test_loader, inner_optim=inner_optim, loss_module=loss_module, **kwargs)
+    top_k_accs_random, all_preds, _ground_truth = evaluate(random_model, test_loader, model_type='random', **kwargs)
+
+    # create_confusion_matrix(all_preds, ground_truth)
+    metrics.update(macro_average_metrics(all_preds, ground_truth))
 
     # write to stdout and file
-    log_results(top_k_accs=top_k_accs, top_k_accs_random=top_k_accs_random, **kwargs)
-    
+    log_results(top_k_accs=top_k_accs, top_k_accs_random=top_k_accs_random, metrics=metrics, **kwargs)
 
-def log_results(top_k_accs, top_k_accs_random, save_dir='evals', ks: list = [1, 5, 15], model_name='', **kwargs):
+def macro_average_metrics(y_pred, y_true):
+    print(y_pred[:20], y_true[:20])
+    precision = precision_score(y_true, y_pred, average='macro')
+    recall = recall_score(y_true, y_pred, average='macro')
+    f1 = f1_score(y_true, y_pred, average='macro')
+    return {
+        'precision': precision, 
+        'recall': recall, 
+        'f1': f1
+    }
+
+def create_confusion_matrix(all_preds, ground_truth):
+    # cm = confusion_matrix(ground_truth, all_preds)
+    # disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+    # disp.plot()
+    plt.show()
+    print('help meeeee')
+
+def log_results(top_k_accs, top_k_accs_random, save_dir='evals', ks: list = [1, 5, 15], model_name='', metrics=None, **kwargs):
     v = 1
     dir_path = os.path.join(base, save_dir)
     os.makedirs(dir_path, exist_ok=True)
@@ -75,13 +98,19 @@ def log_results(top_k_accs, top_k_accs_random, save_dir='evals', ks: list = [1, 
             msg = f'Top {k} accuracy = {100 * acc:.2f}%, random = {100 * rand_acc:.2f}%.\n'
             logger.info(msg)
             msgs.append(msg)
+        
+        for m in metrics:
+            msg = f'{m}: {metrics[m]}'
+            logger.info(msg)
+            msgs.append(msg)
             
         f.writelines(msgs)
 
 
-def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_encoder_on_support=False, inner_optim=None, loss_type='ce_loss', model_type="normal", loss_module=None, **kwargs):
+def evaluate(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_encoder_on_support=False, inner_optim=None, loss_type='ce_loss', model_type="normal", loss_module=None, **kwargs):
     correct_ks = np.zeros(len(ks))
-    all_preds = defaultdict(int)
+    all_preds = []
+    ground_truth = []
     total = 0
     if unfreeze_encoder_on_support:
         model.unfreeze()
@@ -137,11 +166,14 @@ def top_k(model: Module, test_loader, ks: list = [1, 5, 15], n_shot=0, unfreeze_
 
                 total += logits.shape[0]
                 preds = torch.argmax(logits, dim=1)
-                for pred in preds:
-                    all_preds[pred.item()] += 1
+                if callable(getattr(model, "generate", None)):
+                    all_preds.extend(preds.cpu().tolist())
+                else:
+                    all_preds.extend(batch['w_lbs'][preds].cpu().tolist())
+                ground_truth.extend(batch['w_lbs'].cpu().tolist())
             model.load_state_dict(old)
-    print(torch.topk(F.softmax(torch.tensor(list(all_preds.values())).to(torch.float32)), 1))
-    return correct_ks / total
+    # print(torch.topk(F.softmax(torch.tensor(list(all_preds.values())).to(torch.float32)), 1))
+    return correct_ks / total, all_preds, ground_truth
 
 
 def load_model(model_dir, word_index, args=None, type='classifier_head', inner_lr=0.001, **kwargs):
@@ -168,7 +200,7 @@ def load_model(model_dir, word_index, args=None, type='classifier_head', inner_l
         loss_module = ClipLoss(**kw, dset_args=args.dset)
         params = list(model.parameters())
         if optargs.name == "adam":
-            inner_optim = optim.Adam(params, lr=optargs.lr, betas=(0.9, optargs.beta2))
+            inner_optim = optim.SGD(params, lr=inner_lr)
 
     elif type == 'classifier_head':
         model_cls = registry.get_model_class("Clip-Audio-Emformer")

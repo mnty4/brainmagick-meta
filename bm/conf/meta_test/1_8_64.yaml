@@ -1,4 +1,4 @@
-model_dir: '/home/lukas/projects/brainmagick/bm/runs/no_meta_simple_conv_32_shot_32_way_v20/best_checkpoint_0_21.pth'
+model_dir: '/home/lukas/projects/brainmagick/bm/runs/no_meta_simple_conv_128_shot_128_way_v1/best_checkpoint_3_426.pth'
 # ks: [1, 5, 15, 50, 500, 1500]
 ks: [1, 5, 15, 50]
 

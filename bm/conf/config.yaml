@@ -10,6 +10,9 @@ defaults:
   - meta_test: defaults
   - meta_preprocess: defaults
 
+meta_train:
+  inner_lr: 0.1
+
 # Wandb config
 wandb:
   use_wandb: false
